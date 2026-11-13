@@ -133,11 +133,11 @@ mod tests {
     }
 
     #[test]
-    fn keys_inserted_outoforder_balance() {
+    fn iter_is_sorted_and_reflects_replacement() {
         let mut table = MemTable::new();
         table.put(vec![20], vec![1]);
-        table.put(vec![10, 5], vec![2]);
         table.put(vec![10], vec![3]);
+        table.put(vec![10, 5], vec![2]);
         table.put(vec![20], vec![4]);
         {
             let v: Vec<_> = table.iter().collect();
