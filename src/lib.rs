@@ -1,14 +1,13 @@
 use std::collections::BTreeMap;
 
+#[derive(Default)]
 pub struct MemTable {
     store: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 impl MemTable {
     pub fn new() -> Self {
-        Self {
-            store: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
