@@ -27,7 +27,6 @@ impl MemTable {
         self.store.iter().map(|(k, v)| (k.as_slice(), v.as_slice()))
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn test_non_utf8_keys() {
+    fn non_utf8_keys() {
         let mut table = MemTable::new();
         table.put(vec![255], vec![255]);
         assert_eq!(table.get(vec![255].as_slice()), Some(vec![255].as_slice()));
@@ -109,10 +108,8 @@ mod tests {
     #[test]
     fn empty_table_yields_no_entries() {
         let table = MemTable::new();
-        {
-            let v: Vec<_> = table.iter().collect();
-            assert!(v.is_empty());
-        }
+        let v: Vec<_> = table.iter().collect();
+        assert!(v.is_empty());
     }
 
     #[test]
@@ -120,16 +117,12 @@ mod tests {
         let mut table = MemTable::new();
 
         table.put(b"abc".to_vec(), b"def".to_vec());
-        {
-            let v: Vec<_> = table.iter().collect();
-            assert_eq!(v[0], (b"abc".as_slice(), b"def".as_slice()));
-        }
+        let v: Vec<_> = table.iter().collect();
+        assert_eq!(v[0], (b"abc".as_slice(), b"def".as_slice()));
 
         table.remove(b"abc");
-        {
-            let v: Vec<_> = table.iter().collect();
-            assert!(v.is_empty());
-        }
+        let v: Vec<_> = table.iter().collect();
+        assert!(v.is_empty());
     }
 
     #[test]
@@ -139,10 +132,8 @@ mod tests {
         table.put(vec![10], vec![3]);
         table.put(vec![10, 5], vec![2]);
         table.put(vec![20], vec![4]);
-        {
-            let v: Vec<_> = table.iter().collect();
-            let expected: &[(&[u8], &[u8])] = &[(&[10], &[3]), (&[10, 5], &[2]), (&[20], &[4])];
-            assert_eq!(v, expected);
-        }
+        let v: Vec<_> = table.iter().collect();
+        let expected: &[(&[u8], &[u8])] = &[(&[10], &[3]), (&[10, 5], &[2]), (&[20], &[4])];
+        assert_eq!(v, expected);
     }
 }
