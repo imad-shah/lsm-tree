@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+mod record;
 
 #[derive(Default)]
 pub struct MemTable {
