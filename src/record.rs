@@ -19,7 +19,7 @@ pub(crate) struct Record {
 }
 
 pub(crate) fn encode(key: &[u8], value: &[u8]) -> Result<Vec<u8>, TryFromIntError> {
-    let mut res: Vec<u8> = Vec::with_capacity(HEADER_LEN + key.len() + value.len());
+    let mut res: Vec<u8> = Vec::new();
 
     // take the length, make sure it fits into a u32, make into le bytes
     res.extend_from_slice(&u32::try_from(key.len())?.to_le_bytes());
