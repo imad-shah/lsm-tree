@@ -1,8 +1,20 @@
+//! The format for one key-value pair, and how to encode/decode it
+//!
+//! ```text
+//! offset:  0             4             8                 13         16
+//!          ┌─────────────┬─────────────┬─────────────────┬──────────┐
+//!          │ key_len     │ value_len   │ key             │ value    │
+//!          │ 05 00 00 00 │ 03 00 00 00 │ 61 70 70 6c 65  │ 72 65 64 │
+//!          │ = 5         │ = 3         │ a  p  p  l  e   │ r  e  d  │
+//!          └─────────────┴─────────────┴─────────────────┴──────────┘
+//! ```
+//!
+//! Both lengths are `u32`s stored **little-endian**
+
 use std::num::TryFromIntError;
 
 /// Size of the record header
-/// 4 byte key length
-/// 4 byte value length
+/// 4 byte key_len + 4 byte value_len
 const HEADER_LEN: usize = 8;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -12,6 +24,22 @@ pub(crate) enum DecodeError {
     LengthOverflow,
 }
 
+/// A key-value entry stored as byte vectors.
+///
+/// Used internally to represent a single record where both the key and value
+/// are byte sequences
+///
+/// # Examples
+///
+/// ```ignore
+/// let record = Record {
+///     key: b"user:1001".to_vec(),
+///     value: b"alice".to_vec(),
+/// };
+///
+/// assert_eq!(record.key, b"user:1001");
+/// assert_eq!(record.value, b"alice");
+/// ```
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Record {
     pub(crate) key: Vec<u8>,
