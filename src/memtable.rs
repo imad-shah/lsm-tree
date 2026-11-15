@@ -1,8 +1,14 @@
 use std::collections::BTreeMap;
 
+/// In-memory, sorted write buffer.
+///
+/// Every key maps to an [`Entry`](crate::entry::Entry): either a live value or a
+/// [`Tombstone`](crate::entry::Entry::Tombstone). The tombstone records that the key was
+/// deleted. Tombstones are kept so that when the memtable is
+/// flushed, the delete shadows older values for the same key in older SSTables
 #[derive(Default)]
 pub struct MemTable {
-    store: BTreeMap<Vec<u8>, Vec<u8>>,
+    store: BTreeMap<Vec<u8>, crate::entry::Entry>,
 }
 
 impl MemTable {
@@ -10,25 +16,43 @@ impl MemTable {
         Self::default()
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        self.store.get(key).map(|bytes| bytes.as_slice())
+    /// Returns the entry stored for `key`.
+    ///
+    /// - `Some(Entry::Value(_))`: the key has a live value
+    /// - `Some(Entry::Tombstone)`: the key was deleted in this memtable
+    /// - `None`: this memtable knows nothing about the key (an older SSTable might)
+    pub fn get(&self, key: &[u8]) -> Option<&crate::entry::Entry> {
+        self.store.get(key)
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
-        self.store.insert(key, value);
+        self.store.insert(key, crate::entry::Entry::Value(value));
     }
 
+    /// Marks `key` as deleted by storing a tombstone
+    ///
+    /// This records a tombstone even if the key was never written to this
+    /// memtable, because the key may still be live in an older SSTable
     pub fn remove(&mut self, key: &[u8]) {
-        self.store.remove(key);
+        self.store
+            .insert(key.to_vec(), crate::entry::Entry::Tombstone);
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
-        self.store.iter().map(|(k, v)| (k.as_slice(), v.as_slice()))
+    /// Iterates over every entr in ascending key order
+    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &crate::entry::Entry)> {
+        self.store.iter().map(|(k, v)| (k.as_slice(), v))
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entry::Entry;
+
+    // helper so expected values are readable
+    fn val(bytes: &[u8]) -> Entry {
+        Entry::Value(bytes.to_vec())
+    }
 
     #[test]
     fn missing_key_get_returns_none() {
@@ -40,7 +64,7 @@ mod tests {
     fn inserted_bytes_ok_retrieve() {
         let mut table = MemTable::new();
         table.put(b"abc".to_vec(), b"def".to_vec());
-        assert_eq!(table.get(b"abc"), Some(b"def".as_slice()));
+        assert_eq!(table.get(b"abc"), Some(&val(b"def")));
     }
 
     #[test]
@@ -48,29 +72,40 @@ mod tests {
         let mut table = MemTable::new();
         table.put(b"abc".to_vec(), b"def".to_vec());
         table.put(b"abc".to_vec(), b"hij".to_vec());
-        assert_eq!(table.get(b"abc"), Some(b"hij".as_slice()));
+        assert_eq!(table.get(b"abc"), Some(&val(b"hij")));
     }
 
     #[test]
     fn empty_value_present_not_absent() {
         let mut table = MemTable::new();
         table.put(b"abc".to_vec(), b"".to_vec());
-        assert_eq!(table.get(b"abc"), Some(b"".as_slice()));
+        assert_eq!(table.get(b"abc"), Some(&val(b"")));
+        assert_ne!(table.get(b"abc"), Some(&Entry::Tombstone));
     }
 
     #[test]
-    fn remove_deletes_key() {
+    fn remove_replaces_value_with_tombstone() {
         let mut table = MemTable::new();
         table.put(b"abc".to_vec(), b"def".to_vec());
-        assert_eq!(table.get(b"abc"), Some(b"def".as_slice()));
+        assert_eq!(table.get(b"abc"), Some(&val(b"def")));
         table.remove(b"abc");
-        assert_eq!(table.get(b"abc"), None);
+        assert_eq!(table.get(b"abc"), Some(&Entry::Tombstone));
     }
 
     #[test]
-    fn remove_absentkey_no_error() {
+    fn remove_absent_key_records_tombstone() {
         let mut table = MemTable::new();
         table.remove(b"abc");
+        assert_eq!(table.get(b"abc"), Some(&Entry::Tombstone));
+    }
+
+    #[test]
+    fn put_after_remove_overrides_tombstone() {
+        let mut table = MemTable::new();
+        table.put(b"abc".to_vec(), b"def".to_vec());
+        table.remove(b"abc");
+        table.put(b"abc".to_vec(), b"xyz".to_vec());
+        assert_eq!(table.get(b"abc"), Some(&val(b"xyz")));
     }
 
     #[test]
@@ -84,16 +119,16 @@ mod tests {
     fn empty_key_can_be_inserted_retrieved_removed() {
         let mut table = MemTable::new();
         table.put(b"".to_vec(), b"def".to_vec());
-        assert_eq!(table.get(b""), Some(b"def".as_slice()));
+        assert_eq!(table.get(b""), Some(&val(b"def")));
         table.remove(b"");
-        assert_eq!(table.get(b""), None);
+        assert_eq!(table.get(b""), Some(&Entry::Tombstone));
     }
 
     #[test]
     fn non_utf8_keys() {
         let mut table = MemTable::new();
         table.put(vec![255], vec![255]);
-        assert_eq!(table.get(vec![255].as_slice()), Some(vec![255].as_slice()));
+        assert_eq!(table.get(&[255]), Some(&val(&[255])));
     }
 
     #[test]
@@ -101,7 +136,8 @@ mod tests {
         let mut table = MemTable::new();
         table.put(b"abc".to_vec(), b"def".to_vec());
         table.remove(b"");
-        assert_eq!(table.get(b"abc"), Some(b"def".as_slice()));
+        assert_eq!(table.get(b"abc"), Some(&val(b"def")));
+        assert_eq!(table.get(b""), Some(&Entry::Tombstone));
     }
 
     #[test]
@@ -112,16 +148,16 @@ mod tests {
     }
 
     #[test]
-    fn removed_key_does_not_appear_iter() {
+    fn removed_key_appears_in_iter_as_tombstone() {
         let mut table = MemTable::new();
 
         table.put(b"abc".to_vec(), b"def".to_vec());
         let v: Vec<_> = table.iter().collect();
-        assert_eq!(v[0], (b"abc".as_slice(), b"def".as_slice()));
+        assert_eq!(v, vec![(b"abc".as_slice(), &val(b"def"))]);
 
         table.remove(b"abc");
         let v: Vec<_> = table.iter().collect();
-        assert!(v.is_empty());
+        assert_eq!(v, vec![(b"abc".as_slice(), &Entry::Tombstone)]);
     }
 
     #[test]
@@ -131,8 +167,15 @@ mod tests {
         table.put(vec![10], vec![3]);
         table.put(vec![10, 5], vec![2]);
         table.put(vec![20], vec![4]);
+        table.remove(&[15]);
         let v: Vec<_> = table.iter().collect();
-        let expected: &[(&[u8], &[u8])] = &[(&[10], &[3]), (&[10, 5], &[2]), (&[20], &[4])];
+        let (three, two, four) = (val(&[3]), val(&[2]), val(&[4]));
+        let expected: Vec<(&[u8], &Entry)> = vec![
+            (&[10], &three),
+            (&[10, 5], &two),
+            (&[15], &Entry::Tombstone),
+            (&[20], &four),
+        ];
         assert_eq!(v, expected);
     }
 }
