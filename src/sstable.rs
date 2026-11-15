@@ -1,10 +1,96 @@
+//! Writes a [`MemTable`](crate::MemTable) to disk as an SSTable (Sorted String
+//! Table) file.
+//!
+//! A file holding three entries looks like this:
+//!
+//! ```text
+//! offset: 0                   18                     38                 55
+//!         ┌───────────────────┬──────────────────────┬──────────────────┐
+//!         │ apple → green     │ banana → yellow      │ cherry → red     │
+//!         │ 8 + 5 + 5 = 18 B  │ 8 + 6 + 6 = 20 B     │ 8 + 6 + 3 = 17 B │
+//!         └───────────────────┴──────────────────────┴──────────────────┘
+//! ```
+//!
+//! note:
+//! atm, there is no index or footer, so finding a key means reading records from
+//! the start of the file
+//!
 use std::io::Write;
 
 #[derive(Debug)]
 pub(crate) enum TableWriteError {
+    /// A key or value was longer than `u32::MAX` bytes, so its length doesn't fit in
+    /// the record header. Carries the original conversion error.
     Encode(std::num::TryFromIntError),
+    /// The file couldn't be created or written. Check `.kind()` on the inner error:
+    /// `ErrorKind::AlreadyExists` means a file was already at that path.
     Io(std::io::Error),
 }
+
+#[derive(Debug)]
+pub(crate) enum TableReadError {
+    Io(std::io::Error),
+    Decode(crate::record::DecodeError),
+    InvalidKeyOrder,
+}
+
+pub(crate) struct SsTable {
+    records: Vec<crate::record::Record>,
+}
+
+impl SsTable {
+    pub(crate) fn open(path: &std::path::Path) -> Result<Self, TableReadError> {
+        let file_contents = std::fs::read(&path).map_err(TableReadError::Io)?;
+        let mut raw_file_contents: &[u8] = file_contents.as_slice();
+
+        let mut decoded: Vec<crate::record::Record> = Vec::new();
+
+        while let Some((record, size)) =
+            crate::record::decode(raw_file_contents).map_err(TableReadError::Decode)?
+        {
+            if let Some(last) = decoded.last()
+                && record.key <= last.key
+            {
+                return Err(TableReadError::InvalidKeyOrder);
+            }
+            decoded.push(record);
+            raw_file_contents = &raw_file_contents[size..];
+        }
+
+        Ok(SsTable { records: decoded })
+    }
+
+    pub(crate) fn get(&self, key: &[u8]) -> Option<&[u8]> {
+        for rec in &self.records {
+            if rec.key == key {
+                return Some(rec.value.as_slice());
+            } else if rec.key.as_slice() > key {
+                break;
+            }
+        }
+        None
+    }
+}
+
+/// Writes every key-value pair of `table`, into a new file at
+/// `path`.
+///
+/// ```ignore
+/// let mut table = MemTable::new();
+/// table.put(b"cherry".to_vec(), b"red".to_vec());
+/// table.put(b"apple".to_vec(), b"green".to_vec());
+///
+/// write_new(Path::new("data/000001.sst"), &table)?;
+/// // New file contains: [apple -> green][cherry -> red]
+/// ```
+///
+/// # Errors
+///
+/// - [`TableWriteError::Io`] with kind `AlreadyExists` if a file is already at
+///   `path`
+/// - [`TableWriteError::Io`] for any other failure to open or write the file
+///   (missing directory, no permission, disk full, etc)
+/// - [`TableWriteError::Encode`] if a key or value is longer than `u32::MAX` bytes
 
 pub(crate) fn write_new(
     path: &std::path::Path,
@@ -25,6 +111,8 @@ pub(crate) fn write_new(
 }
 #[cfg(test)]
 mod test {
+    use crate::MemTable;
+
     use super::*;
     use std::fs;
     use std::io::ErrorKind;
@@ -116,5 +204,24 @@ mod test {
                 (b"grape".as_slice(), b"purple".as_slice()),
             ]
         );
+    }
+
+    // fn empty_table_test()
+    #[test]
+    fn round_trip_test_open_and_get() {
+        let mut table = MemTable::new();
+        table.put(b"banana".to_vec(), b"yellow".to_vec());
+        table.put(b"apple".to_vec(), b"red".to_vec());
+        table.put(b"grape".to_vec(), b"purple".to_vec());
+
+        let dir = tempdir().unwrap();
+        let fp = dir.path().join("sstable.sst");
+        write_new(&fp, &table).unwrap();
+
+        let sstable = SsTable::open(&fp).unwrap();
+        assert_eq!(sstable.get(b"apple"), Some(b"red".as_slice()));
+        assert_eq!(sstable.get(b"banana"), Some(b"yellow".as_slice()));
+        assert_eq!(sstable.get(b"grape"), Some(b"purple".as_slice()));
+        assert_eq!(sstable.get(b"0000"), None);
     }
 }
