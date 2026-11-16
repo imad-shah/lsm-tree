@@ -77,6 +77,11 @@ impl SsTable {
             .ok()
             .map(|i| &self.records[i].value)
     }
+
+    /// Iterates over every entry in ascending key order
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&[u8], &crate::entry::Entry)> {
+        self.records.iter().map(|r| (r.key.as_slice(), &r.value))
+    }
 }
 
 /// Writes every entry of `table`, tombstones included, into a new file at
