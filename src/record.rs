@@ -161,6 +161,21 @@ pub(crate) fn decode(input: &[u8]) -> Result<Option<(Record, usize)>, DecodeErro
     Ok(Some((record, value_end)))
 }
 
+/// Decodes back-to-back records until `input` is exhausted
+///
+/// # Errors
+///
+/// Returns the first [`DecodeError`] hit; any trailing bytes that don't form a
+/// complete record are an error, not silently ignored
+pub(crate) fn decode_all(mut input: &[u8]) -> Result<Vec<Record>, DecodeError> {
+    let mut records = Vec::new();
+    while let Some((record, consumed)) = decode(input)? {
+        records.push(record);
+        input = &input[consumed..];
+    }
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,5 +554,40 @@ mod tests {
             0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x61, 0x70,
         ];
         assert_eq!(decode(input), Err(DecodeError::TruncatedPayload));
+    }
+
+    #[test]
+    fn decode_all_empty_input_returns_no_records() {
+        assert_eq!(decode_all(&[]), Ok(vec![]));
+    }
+    #[test]
+    fn decode_all_reads_every_record() {
+        let mut input = encode(b"apple", &val(b"red")).unwrap();
+        input.extend(encode(b"banana", &Entry::Tombstone).unwrap());
+        input.extend(encode(b"cherry", &val(b"")).unwrap());
+        assert_eq!(
+            decode_all(&input),
+            Ok(vec![
+                Record {
+                    key: b"apple".to_vec(),
+                    value: val(b"red"),
+                },
+                Record {
+                    key: b"banana".to_vec(),
+                    value: Entry::Tombstone,
+                },
+                Record {
+                    key: b"cherry".to_vec(),
+                    value: val(b""),
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn decode_all_rejects_trailing_partial_record() {
+        let mut input = encode(b"apple", &val(b"red")).unwrap();
+        input.extend_from_slice(&[0x00, 0x01]);
+        assert_eq!(decode_all(&input), Err(DecodeError::TruncatedHeader));
     }
 }
