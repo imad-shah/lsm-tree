@@ -21,11 +21,11 @@ impl MemTable {
     /// - `Some(Entry::Value(_))`: the key has a live value
     /// - `Some(Entry::Tombstone)`: the key was deleted in this memtable
     /// - `None`: this memtable knows nothing about the key (an older SSTable might)
-    pub fn get(&self, key: &[u8]) -> Option<&crate::entry::Entry> {
+    pub(crate) fn get(&self, key: &[u8]) -> Option<&crate::entry::Entry> {
         self.store.get(key)
     }
 
-    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
+    pub(crate) fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
         self.store.insert(key, crate::entry::Entry::Value(value));
     }
 
@@ -33,13 +33,13 @@ impl MemTable {
     ///
     /// This records a tombstone even if the key was never written to this
     /// memtable, because the key may still be live in an older SSTable
-    pub fn remove(&mut self, key: &[u8]) {
+    pub(crate) fn remove(&mut self, key: &[u8]) {
         self.store
             .insert(key.to_vec(), crate::entry::Entry::Tombstone);
     }
 
     /// Iterates over every entry in ascending key order
-    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &crate::entry::Entry)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&[u8], &crate::entry::Entry)> {
         self.store.iter().map(|(k, v)| (k.as_slice(), v))
     }
 }
