@@ -1,5 +1,3 @@
-use crate::entry;
-
 pub(crate) struct Engine {
     memtable: crate::memtable::MemTable,
     sstables: Vec<crate::sstable::SsTable>,
@@ -158,5 +156,104 @@ mod test {
 
         assert_eq!(eng.get(b"apple"), None);
         assert_eq!(eng.get(b"banana"), Some(b"yellow".as_slice()));
+    }
+    #[test]
+    fn untouched_key_in_oldest_table_is_found() {
+        let mut eng = crate::engine::Engine::new();
+        let dir = tempfile::tempdir().unwrap();
+
+        eng.put(b"apple".to_vec(), b"red".to_vec());
+        eng.put(b"banana".to_vec(), b"yellow".to_vec());
+        eng.flush(&dir.path().join("1.sst")).unwrap();
+
+        eng.remove(b"apple");
+        eng.put(b"cherry".to_vec(), b"dark red".to_vec());
+        eng.flush(&dir.path().join("2.sst")).unwrap();
+
+        eng.put(b"apple".to_vec(), b"green".to_vec());
+        eng.put(b"durian".to_vec(), b"spiky".to_vec());
+        eng.flush(&dir.path().join("3.sst")).unwrap();
+
+        assert_eq!(eng.get(b"banana"), Some(b"yellow".as_slice()));
+        assert_eq!(eng.get(b"cherry"), Some(b"dark red".as_slice()));
+        assert_eq!(eng.get(b"apple"), Some(b"green".as_slice()));
+    }
+
+    #[test]
+    fn missing_key_across_several_tables_returns_none() {
+        let mut eng = crate::engine::Engine::new();
+        let dir = tempfile::tempdir().unwrap();
+
+        eng.put(b"apple".to_vec(), b"red".to_vec());
+        eng.put(b"cherry".to_vec(), b"dark red".to_vec());
+        eng.flush(&dir.path().join("1.sst")).unwrap();
+
+        eng.put(b"banana".to_vec(), b"yellow".to_vec());
+        eng.remove(b"durian");
+        eng.flush(&dir.path().join("2.sst")).unwrap();
+
+        eng.put(b"elderberry".to_vec(), b"purple".to_vec());
+
+        for key in [b"".as_slice(), b"aardvark", b"blueberry", b"date", b"zzz"] {
+            assert_eq!(eng.get(key), None, "key {key:?} should be absent");
+        }
+    }
+
+    #[test]
+    fn empty_and_arbitrary_byte_values_keep_newest_write() {
+        let mut eng = crate::engine::Engine::new();
+        let dir = tempfile::tempdir().unwrap();
+
+        eng.put(b"apple".to_vec(), b"red".to_vec());
+        eng.flush(&dir.path().join("1.sst")).unwrap();
+
+        eng.put(b"apple".to_vec(), vec![]);
+        eng.flush(&dir.path().join("2.sst")).unwrap();
+        assert_eq!(eng.get(b"apple"), Some(b"".as_slice()));
+
+        eng.put(b"apple".to_vec(), vec![0x00, 0xff, 0x80]);
+        eng.flush(&dir.path().join("3.sst")).unwrap();
+        assert_eq!(eng.get(b"apple"), Some([0x00, 0xff, 0x80].as_slice()));
+
+        eng.put(b"apple".to_vec(), vec![]);
+        assert_eq!(eng.get(b"apple"), Some(b"".as_slice()));
+    }
+
+    #[test]
+    fn empty_flush_succeeds_and_preserves_reads() {
+        let mut eng = crate::engine::Engine::new();
+        let dir = tempfile::tempdir().unwrap();
+
+        eng.flush(&dir.path().join("1.sst")).unwrap();
+        assert_eq!(eng.get(b"apple"), None);
+
+        eng.put(b"apple".to_vec(), b"red".to_vec());
+        eng.flush(&dir.path().join("2.sst")).unwrap();
+
+        eng.flush(&dir.path().join("3.sst")).unwrap();
+        assert_eq!(eng.get(b"apple"), Some(b"red".as_slice()));
+    }
+
+    #[test]
+    fn failed_file_creation_keeps_memtable() {
+        let mut eng = crate::engine::Engine::new();
+        let dir = tempfile::tempdir().unwrap();
+
+        eng.put(b"apple".to_vec(), b"red".to_vec());
+        eng.remove(b"banana");
+        let err = eng
+            .flush(&dir.path().join("missing_dir").join("1.sst"))
+            .unwrap_err();
+        assert!(
+            matches!(&err, crate::engine::FlushError::Write(crate::sstable::TableWriteError::Io(e))
+                if e.kind() == std::io::ErrorKind::NotFound),
+            "got {err:?}"
+        );
+
+        assert_eq!(eng.get(b"apple"), Some(b"red".as_slice()));
+        assert_eq!(eng.get(b"banana"), None);
+
+        eng.flush(&dir.path().join("1.sst")).unwrap();
+        assert_eq!(eng.get(b"apple"), Some(b"red".as_slice()));
     }
 }
