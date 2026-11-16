@@ -1,4 +1,4 @@
-//! Writes a [`MemTable`](crate::MemTable) to disk as an SSTable (Sorted String
+//! Writes a [`MemTable`](crate::memtable::MemTable) to disk as an SSTable (Sorted String
 //! Table) file, and reads it back with [`SsTable::open`].
 //!
 //! The file is just records (see [`record`](crate::record)) back to back, in
@@ -53,21 +53,13 @@ impl SsTable {
     /// - [`TableReadError::Decode`] if any record is malformed
     /// - [`TableReadError::InvalidKeyOrder`] if keys aren't strictly increasing
     pub(crate) fn open(path: &std::path::Path) -> Result<Self, TableReadError> {
-        let file_contents = std::fs::read(&path).map_err(TableReadError::Io)?;
-        let mut raw_file_contents: &[u8] = file_contents.as_slice();
+        let file_contents = std::fs::read(path).map_err(TableReadError::Io)?;
+        let decoded = crate::record::decode_all(&file_contents).map_err(TableReadError::Decode)?;
 
-        let mut decoded: Vec<crate::record::Record> = Vec::new();
-
-        while let Some((record, size)) =
-            crate::record::decode(raw_file_contents).map_err(TableReadError::Decode)?
-        {
-            if let Some(last) = decoded.last()
-                && record.key <= last.key
-            {
+        for i in 1..decoded.len() {
+            if decoded[i].key <= decoded[i - 1].key {
                 return Err(TableReadError::InvalidKeyOrder);
             }
-            decoded.push(record);
-            raw_file_contents = &raw_file_contents[size..];
         }
 
         Ok(SsTable { records: decoded })
@@ -80,14 +72,10 @@ impl SsTable {
     ///   searching older tables
     /// - `None`: this table has no record for the key
     pub(crate) fn get(&self, key: &[u8]) -> Option<&crate::entry::Entry> {
-        for rec in &self.records {
-            if rec.key == key {
-                return Some(&rec.value);
-            } else if rec.key.as_slice() > key {
-                break;
-            }
-        }
-        None
+        self.records
+            .binary_search_by(|r| r.key.as_slice().cmp(key))
+            .ok()
+            .map(|i| &self.records[i].value)
     }
 }
 
@@ -131,7 +119,7 @@ pub(crate) fn write_new(
 
 #[cfg(test)]
 mod test {
-    use crate::MemTable;
+    use crate::memtable::MemTable;
 
     use super::*;
     use crate::entry::Entry;
@@ -170,16 +158,7 @@ mod test {
         write_new(&fp, &table).unwrap();
 
         let bytes = fs::read(&fp).unwrap();
-        let mut remaining: &[u8] = &bytes;
-        let mut decoded = Vec::new();
-
-        // keep pulling out (record, size)'s
-        // push records into the decoded vec
-        // move the slice forward by jumping `size` distance
-        while let Some((record, size)) = crate::record::decode(remaining).unwrap() {
-            decoded.push(record);
-            remaining = &remaining[size..];
-        }
+        let decoded = crate::record::decode_all(&bytes).unwrap();
 
         assert_eq!(
             decoded,
@@ -202,8 +181,6 @@ mod test {
                 },
             ]
         );
-
-        assert!(remaining.is_empty());
     }
 
     #[test]
@@ -383,6 +360,167 @@ mod test {
         let err = SsTable::open(&fp).err().unwrap();
         assert!(
             matches!(err, TableReadError::Decode(DecodeError::TruncatedPayload)),
+            "got {err:?}"
+        );
+    }
+    #[test]
+    fn get_finds_first_middle_and_last_keys() {
+        let mut table = MemTable::new();
+        table.put(b"apple".to_vec(), b"red".to_vec());
+        table.put(b"banana".to_vec(), b"yellow".to_vec());
+        table.put(b"cherry".to_vec(), b"dark red".to_vec());
+        table.put(b"durian".to_vec(), b"spiky".to_vec());
+        table.put(b"elderberry".to_vec(), b"purple".to_vec());
+        table.put(b"fig".to_vec(), b"brown".to_vec());
+        table.put(b"grape".to_vec(), b"green".to_vec());
+
+        let dir = tempdir().unwrap();
+        let fp = dir.path().join("search.sst");
+        write_new(&fp, &table).unwrap();
+        let sstable = SsTable::open(&fp).unwrap();
+
+        assert_eq!(sstable.get(b"apple"), Some(&val(b"red")));
+        assert_eq!(sstable.get(b"grape"), Some(&val(b"green")));
+        assert_eq!(sstable.get(b"durian"), Some(&val(b"spiky")));
+
+        for (key, entry) in table.iter() {
+            assert_eq!(sstable.get(key), Some(entry), "key {key:?} should be found");
+        }
+    }
+
+    #[test]
+    fn get_missing_keys_before_between_and_after() {
+        let mut table = MemTable::new();
+        table.put(b"b".to_vec(), b"1".to_vec());
+        table.put(b"d".to_vec(), b"2".to_vec());
+        table.put(b"f".to_vec(), b"3".to_vec());
+        table.put(b"h".to_vec(), b"4".to_vec());
+        table.put(b"j".to_vec(), b"5".to_vec());
+
+        let dir = tempdir().unwrap();
+        let fp = dir.path().join("gaps.sst");
+        write_new(&fp, &table).unwrap();
+        let sstable = SsTable::open(&fp).unwrap();
+
+        assert_eq!(sstable.get(b""), None);
+        assert_eq!(sstable.get(b"a"), None);
+        for key in [b"c", b"e", b"g", b"i"] {
+            assert_eq!(sstable.get(key), None, "key {key:?} should be absent");
+        }
+        assert_eq!(sstable.get(b"bb"), None);
+        assert_eq!(sstable.get(b"d\x00"), None);
+        assert_eq!(sstable.get(b"k"), None);
+        assert_eq!(sstable.get(&[0xff]), None);
+    }
+
+    #[test]
+    fn get_distinguishes_tombstone_empty_value_and_absence() {
+        let mut table = MemTable::new();
+        table.remove(b"apple");
+        table.put(b"banana".to_vec(), b"yellow".to_vec());
+        table.put(b"cherry".to_vec(), b"".to_vec());
+        table.put(b"durian".to_vec(), b"spiky".to_vec());
+        table.remove(b"elderberry");
+
+        let dir = tempdir().unwrap();
+        let fp = dir.path().join("three_way.sst");
+        write_new(&fp, &table).unwrap();
+        let sstable = SsTable::open(&fp).unwrap();
+
+        assert_eq!(sstable.get(b"apple"), Some(&Entry::Tombstone));
+        assert_eq!(sstable.get(b"elderberry"), Some(&Entry::Tombstone));
+        assert_eq!(sstable.get(b"cherry"), Some(&val(b"")));
+        assert_ne!(sstable.get(b"cherry"), Some(&Entry::Tombstone));
+        assert_eq!(sstable.get(b"banana"), Some(&val(b"yellow")));
+        assert_eq!(sstable.get(b"durian"), Some(&val(b"spiky")));
+        assert_eq!(sstable.get(b"blueberry"), None);
+        assert_eq!(sstable.get(b"fig"), None);
+    }
+
+    #[test]
+    fn empty_and_non_utf8_keys_and_values_round_trip() {
+        let mut table = MemTable::new();
+        table.put(b"".to_vec(), b"empty key".to_vec());
+        table.put(vec![0x00], vec![0xff, 0x00]);
+        table.put(b"apple".to_vec(), b"".to_vec());
+        table.put(vec![0x80, 0x81], vec![0xc3, 0x28]);
+        table.put(vec![0xff], vec![]);
+
+        let dir = tempdir().unwrap();
+        let fp = dir.path().join("bytes.sst");
+        write_new(&fp, &table).unwrap();
+        let sstable = SsTable::open(&fp).unwrap();
+
+        assert_eq!(sstable.get(b""), Some(&val(b"empty key")));
+        assert_eq!(sstable.get(&[0x00]), Some(&val(&[0xff, 0x00])));
+        assert_eq!(sstable.get(b"apple"), Some(&val(b"")));
+        assert_eq!(sstable.get(&[0x80, 0x81]), Some(&val(&[0xc3, 0x28])));
+        assert_eq!(sstable.get(&[0xff]), Some(&val(b"")));
+        assert_eq!(sstable.get(&[0x80]), None);
+    }
+
+    #[test]
+    fn sstable_independent_of_source_memtable() {
+        let mut table = MemTable::new();
+        table.put(b"apple".to_vec(), b"red".to_vec());
+        table.put(b"banana".to_vec(), b"yellow".to_vec());
+
+        let dir = tempdir().unwrap();
+        let fp = dir.path().join("independent.sst");
+        write_new(&fp, &table).unwrap();
+        let sstable = SsTable::open(&fp).unwrap();
+
+        table.put(b"apple".to_vec(), b"green".to_vec());
+        table.remove(b"banana");
+        table.put(b"cherry".to_vec(), b"dark red".to_vec());
+        drop(table);
+
+        assert_eq!(sstable.get(b"apple"), Some(&val(b"red")));
+        assert_eq!(sstable.get(b"banana"), Some(&val(b"yellow")));
+        assert_eq!(sstable.get(b"cherry"), None);
+    }
+
+    #[test]
+    fn open_rejects_order_violation_after_valid_prefix() {
+        let dir = tempdir().unwrap();
+        let descending: &[(&[u8], Entry)] = &[
+            (b"apple", val(b"red")),
+            (b"banana", val(b"yellow")),
+            (b"cherry", val(b"dark red")),
+            (b"blueberry", val(b"blue")),
+            (b"durian", val(b"spiky")),
+        ];
+        let duplicate: &[(&[u8], Entry)] = &[
+            (b"apple", val(b"red")),
+            (b"banana", val(b"yellow")),
+            (b"cherry", val(b"dark red")),
+            (b"cherry", Entry::Tombstone),
+            (b"durian", val(b"spiky")),
+        ];
+
+        for (name, records) in [("descending", descending), ("duplicate", duplicate)] {
+            let fp = dir.path().join(format!("{name}.sst"));
+            fs::write(&fp, encode_all(records)).unwrap();
+
+            let err = SsTable::open(&fp).err().unwrap();
+            assert!(
+                matches!(err, TableReadError::InvalidKeyOrder),
+                "{name}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_rejects_truncated_header_after_valid_record() {
+        let dir = tempdir().unwrap();
+        let fp = dir.path().join("truncated_header.sst");
+        let mut bytes = encode_all(&[(b"apple", val(b"red"))]);
+        bytes.extend_from_slice(&[0x00, 0x05, 0x00, 0x00]);
+        fs::write(&fp, bytes).unwrap();
+
+        let err = SsTable::open(&fp).err().unwrap();
+        assert!(
+            matches!(err, TableReadError::Decode(DecodeError::TruncatedHeader)),
             "got {err:?}"
         );
     }
