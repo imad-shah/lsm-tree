@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 /// deleted. Tombstones are kept so that when the memtable is
 /// flushed, the delete shadows older values for the same key in older SSTables
 #[derive(Default)]
-pub struct MemTable {
+pub(crate) struct MemTable {
     store: BTreeMap<Vec<u8>, crate::entry::Entry>,
 }
 
@@ -38,7 +38,7 @@ impl MemTable {
             .insert(key.to_vec(), crate::entry::Entry::Tombstone);
     }
 
-    /// Iterates over every entr in ascending key order
+    /// Iterates over every entry in ascending key order
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], &crate::entry::Entry)> {
         self.store.iter().map(|(k, v)| (k.as_slice(), v))
     }
