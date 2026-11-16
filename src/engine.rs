@@ -114,10 +114,7 @@ mod test {
         // memtable { banana -> blue }
         // sstable2 { apple -> tomb, cherry -> red }
         // sstable1 { apple -> red, banana -> yellow, pear -> green }
-        let mut res = Vec::new();
-        for (key, value) in eng.scan() {
-            res.push((key, value));
-        }
+        let res: Vec<_> = eng.scan().collect();
         assert_eq!(
             res,
             vec![
