@@ -49,6 +49,24 @@ impl Engine {
         self.memtable = crate::memtable::MemTable::new();
         Ok(())
     }
+
+    pub(crate) fn scan(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
+        self.merged_entries()
+            .filter_map(|(key, entry)| match entry {
+                crate::entry::Entry::Value(bytes) => Some((key, bytes.as_slice())),
+                crate::entry::Entry::Tombstone => None,
+            })
+    }
+
+    fn merged_entries(&self) -> crate::merge::MergeIterator<'_> {
+        let mut sources: Vec<crate::merge::Source> = Vec::new();
+        sources.push(Box::new(self.memtable.iter()));
+
+        for sst in self.sstables.iter().rev() {
+            sources.push(Box::new(sst.iter()));
+        }
+        crate::merge::MergeIterator::new(sources)
+    }
 }
 
 #[cfg(test)]
@@ -60,23 +78,54 @@ mod test {
         let fp1 = dir.path().join("first.sst");
         let fp2 = dir.path().join("second.sst");
 
-        let key = b"apple".as_slice();
-        let value = b"red".as_slice();
-        let value_2 = b"green".as_slice();
-
-        eng.put(key.to_vec(), value.to_vec());
-        assert_eq!(eng.get(key), Some(value));
+        eng.put(b"apple".to_vec(), b"red".to_vec());
+        assert_eq!(eng.get(b"apple"), Some(b"red".as_slice()));
         eng.flush(&fp1).unwrap();
-        assert_eq!(eng.get(key), Some(value));
+        assert_eq!(eng.get(b"apple"), Some(b"red".as_slice()));
 
-        eng.remove(key);
-        assert_eq!(eng.get(key), None);
+        eng.remove(b"apple");
+        assert_eq!(eng.get(b"apple"), None);
 
         eng.flush(&fp2).unwrap();
-        assert_eq!(eng.get(key), None);
+        assert_eq!(eng.get(b"apple"), None);
 
-        eng.put(key.to_vec(), value_2.to_vec());
-        assert_eq!(eng.get(key), Some(value_2));
+        eng.put(b"apple".to_vec(), b"green".to_vec());
+        assert_eq!(eng.get(b"apple"), Some(b"green".as_slice()));
+    }
+
+    #[test]
+    fn integration_with_scan() {
+        let mut eng = crate::engine::Engine::new();
+        let dir = tempfile::tempdir().unwrap();
+        let fp1 = dir.path().join("first.sst");
+        let fp2 = dir.path().join("second.sst");
+
+        eng.put(b"apple".to_vec(), b"red".to_vec());
+        eng.put(b"banana".to_vec(), b"yellow".to_vec());
+        eng.put(b"pear".to_vec(), b"green".to_vec());
+        eng.flush(&fp1).unwrap();
+
+        eng.remove(b"apple");
+        eng.put(b"cherry".to_vec(), b"red".to_vec());
+        eng.flush(&fp2).unwrap();
+
+        eng.put(b"banana".to_vec(), b"blue".to_vec());
+        // current state:
+        // memtable { banana -> blue }
+        // sstable2 { apple -> tomb, cherry -> red }
+        // sstable1 { apple -> red, banana -> yellow, pear -> green }
+        let mut res = Vec::new();
+        for (key, value) in eng.scan() {
+            res.push((key, value));
+        }
+        assert_eq!(
+            res,
+            vec![
+                (b"banana".as_slice(), b"blue".as_slice()),
+                (b"cherry".as_slice(), b"red".as_slice()),
+                (b"pear".as_slice(), b"green".as_slice()),
+            ]
+        )
     }
 
     #[test]
