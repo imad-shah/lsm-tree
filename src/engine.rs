@@ -1,6 +1,23 @@
+use crate::sstable::write_new;
+
+pub(crate) struct TableHandle {
+    path: std::path::PathBuf,
+    table: crate::sstable::SsTable,
+}
+
+#[derive(Debug)]
+pub(crate) enum CompactionError {
+    Write(crate::sstable::TableWriteError),
+    Read(crate::sstable::TableReadError),
+}
+
+// represents a vector of failures that occured when writing
+pub(crate) struct CompactionOutcome {
+    cleanup_failures: Vec<(std::path::PathBuf, std::io::Error)>,
+}
 pub(crate) struct Engine {
     memtable: crate::memtable::MemTable,
-    sstables: Vec<crate::sstable::SsTable>,
+    sstables: Vec<TableHandle>,
 }
 
 #[derive(Debug)]
@@ -29,7 +46,7 @@ impl Engine {
         };
 
         for sst in self.sstables.iter().rev() {
-            match sst.get(key) {
+            match sst.table.get(key) {
                 Some(crate::entry::Entry::Value(bytes)) => return Some(bytes.as_slice()),
                 Some(crate::entry::Entry::Tombstone) => return None,
                 None => {}
@@ -43,9 +60,12 @@ impl Engine {
     }
 
     pub(crate) fn flush(&mut self, path: &std::path::Path) -> Result<(), FlushError> {
-        crate::sstable::write_new(path, &self.memtable).map_err(FlushError::Write)?;
+        crate::sstable::write_new(path, self.memtable.iter()).map_err(FlushError::Write)?;
         let table = crate::sstable::SsTable::open(path).map_err(FlushError::Read)?;
-        self.sstables.push(table);
+        self.sstables.push(TableHandle {
+            path: path.to_path_buf(),
+            table,
+        });
         self.memtable = crate::memtable::MemTable::new();
         Ok(())
     }
@@ -58,12 +78,65 @@ impl Engine {
             })
     }
 
+    pub(crate) fn scan_sstables(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
+        self.merged_sstables()
+            .filter_map(|(key, entry)| match entry {
+                crate::entry::Entry::Value(bytes) => Some((key, bytes.as_slice())),
+                crate::entry::Entry::Tombstone => None,
+            })
+    }
+
+    pub(crate) fn compact_all(
+        &mut self,
+        output_path: &std::path::Path,
+    ) -> Result<crate::engine::CompactionOutcome, crate::engine::CompactionError> {
+        // nothing to compact
+        if self.sstables.len() < 2 {
+            return Ok(crate::engine::CompactionOutcome {
+                cleanup_failures: vec![],
+            });
+        }
+        let mut res = crate::engine::CompactionOutcome {
+            cleanup_failures: vec![],
+        };
+
+        write_new(output_path, self.merged_sstables()).map_err(CompactionError::Write)?;
+        let replacement =
+            crate::sstable::SsTable::open(output_path).map_err(CompactionError::Read)?;
+        let replacement_handle = TableHandle {
+            path: output_path.to_path_buf(),
+            table: replacement,
+        };
+        let old_handles = std::mem::replace(&mut self.sstables, vec![replacement_handle]);
+
+        for sstable in old_handles {
+            match std::fs::remove_file(&sstable.path) {
+                Ok(()) => {}
+                Err(e) => {
+                    res.cleanup_failures.push((sstable.path.clone(), e));
+                }
+            }
+        }
+
+        Ok(res)
+    }
+
+    // includes the memtable when creating the merged entries
     fn merged_entries(&self) -> crate::merge::MergeIterator<'_> {
         let mut sources: Vec<crate::merge::Source> = Vec::new();
         sources.push(Box::new(self.memtable.iter()));
 
         for sst in self.sstables.iter().rev() {
-            sources.push(Box::new(sst.iter()));
+            sources.push(Box::new(sst.table.iter()));
+        }
+        crate::merge::MergeIterator::new(sources)
+    }
+
+    // only merges sstables
+    fn merged_sstables(&self) -> crate::merge::MergeIterator<'_> {
+        let mut sources: Vec<crate::merge::Source> = Vec::new();
+        for sst in self.sstables.iter().rev() {
+            sources.push(Box::new(sst.table.iter()));
         }
         crate::merge::MergeIterator::new(sources)
     }
@@ -123,6 +196,78 @@ mod test {
                 (b"pear".as_slice(), b"green".as_slice()),
             ]
         )
+    }
+
+    #[test]
+    fn integration_test_with_compact_all() {
+        let mut eng = crate::engine::Engine::new();
+        let dir = tempfile::tempdir().unwrap();
+        let fp1 = dir.path().join("first.sst");
+        let fp2 = dir.path().join("second.sst");
+        let fp3 = dir.path().join("compacted.sst");
+
+        eng.put(b"apple".to_vec(), b"red".to_vec());
+        eng.put(b"banana".to_vec(), b"yellow".to_vec());
+        eng.put(b"pear".to_vec(), b"green".to_vec());
+        eng.flush(&fp1).unwrap();
+
+        eng.remove(b"apple");
+        eng.put(b"cherry".to_vec(), b"red".to_vec());
+        eng.flush(&fp2).unwrap();
+
+        eng.put(b"banana".to_vec(), b"blue".to_vec());
+        // current state:
+        // memtable { banana -> blue }
+        // sstable2 { apple -> tomb, cherry -> red }
+        // sstable1 { apple -> red, banana -> yellow, pear -> green }
+        {
+            let res: Vec<_> = eng.scan().collect();
+            assert_eq!(
+                res,
+                vec![
+                    (b"banana".as_slice(), b"blue".as_slice()),
+                    (b"cherry".as_slice(), b"red".as_slice()),
+                    (b"pear".as_slice(), b"green".as_slice()),
+                ]
+            );
+        }
+
+        // compact_all should compact the sstable1 & sstable2 into:
+        // sstable3 {apple -> tomb, cherry -> red, banana -> yellow, pear -> green}
+        let outcome = eng.compact_all(&fp3).unwrap();
+        {
+            // the test should ignore the [banana -> blue] from the memtable
+            // and should reuse the [banana -> yellow] from the old sstable1
+            let res: Vec<_> = eng.scan_sstables().collect();
+            assert_eq!(
+                res,
+                vec![
+                    (b"banana".as_slice(), b"yellow".as_slice()),
+                    (b"cherry".as_slice(), b"red".as_slice()),
+                    (b"pear".as_slice(), b"green".as_slice())
+                ]
+            );
+        }
+        assert!(outcome.cleanup_failures.is_empty());
+        assert_eq!(eng.sstables.len(), 1);
+        assert_eq!(eng.sstables[0].path, fp3);
+
+        assert!(fp3.exists());
+        assert!(!fp1.exists());
+        assert!(!fp2.exists());
+        let replacement = &eng.sstables[0].table;
+
+        assert_eq!(
+            replacement.get(b"apple"),
+            Some(&crate::entry::Entry::Tombstone),
+        );
+
+        assert_eq!(
+            replacement.get(b"banana"),
+            Some(&crate::entry::Entry::Value(b"yellow".to_vec())),
+        );
+        assert_eq!(eng.get(b"banana"), Some(b"blue".as_slice()));
+        integration_with_scan();
     }
 
     #[test]

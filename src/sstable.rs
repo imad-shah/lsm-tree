@@ -17,7 +17,9 @@
 //! atm, there is no index or footer, so finding a key means reading records from
 //! the start of the file (WIP)
 
+use crate::entry::Entry;
 use std::io::Write;
+use std::path::Path;
 
 #[derive(Debug)]
 pub(crate) enum TableWriteError {
@@ -93,7 +95,7 @@ impl SsTable {
 /// table.put(b"apple".to_vec(), b"green".to_vec());
 /// table.remove(b"banana");
 ///
-/// write_new(Path::new("data/000001.sst"), &table)?;
+/// write_new(Path::new("data/000001.sst"), table.iter())?;
 /// // New file contains: [apple -> green][banana -> tombstone][cherry -> red]
 /// ```
 ///
@@ -104,9 +106,9 @@ impl SsTable {
 /// - [`TableWriteError::Io`] for any other failure to open or write the file
 ///   (missing directory, no permission, disk full, etc)
 /// - [`TableWriteError::Encode`] if a key or value is longer than `u32::MAX` bytes
-pub(crate) fn write_new(
+pub(crate) fn write_new<'a>(
     path: &std::path::Path,
-    table: &crate::memtable::MemTable,
+    entries: impl Iterator<Item = (&'a [u8], &'a Entry)>,
 ) -> Result<(), TableWriteError> {
     let mut f = std::fs::OpenOptions::new()
         .write(true)
@@ -114,7 +116,7 @@ pub(crate) fn write_new(
         .open(path)
         .map_err(TableWriteError::Io)?;
 
-    for (key, value) in table.iter() {
+    for (key, value) in entries {
         let encoded = crate::record::encode(key, value).map_err(TableWriteError::Encode)?;
         f.write_all(encoded.as_slice())
             .map_err(TableWriteError::Io)?;
@@ -160,7 +162,7 @@ mod test {
         table.remove(b"blueberry");
 
         // write all of these into the file
-        write_new(&fp, &table).unwrap();
+        write_new(&fp, table.iter()).unwrap();
 
         let bytes = fs::read(&fp).unwrap();
         let decoded = crate::record::decode_all(&bytes).unwrap();
@@ -197,7 +199,7 @@ mod test {
         table.put(b"apple".to_vec(), b"green".to_vec());
         table.put(b"banana".to_vec(), b"yellow".to_vec());
         table.remove(b"cherry");
-        write_new(&fp, &table).unwrap();
+        write_new(&fp, table.iter()).unwrap();
 
         assert_eq!(fs::read(&fp).unwrap().len(), 55);
     }
@@ -213,7 +215,7 @@ mod test {
         let mut table = crate::memtable::MemTable::new();
         table.put(b"apple".to_vec(), b"banana".to_vec());
 
-        let err = write_new(&fp, &table).unwrap_err();
+        let err = write_new(&fp, table.iter()).unwrap_err();
         match err {
             TableWriteError::Io(io_err) => assert_eq!(io_err.kind(), ErrorKind::AlreadyExists),
             other => panic!("expected TableWriteError::Io(AlreadyExists), got {other:?}"),
@@ -232,7 +234,7 @@ mod test {
         table.put(b"grape".to_vec(), b"purple".to_vec());
         table.remove(b"kiwi");
 
-        write_new(&fp, &table).unwrap();
+        write_new(&fp, table.iter()).unwrap();
         let remaining_entries: Vec<(&[u8], &Entry)> = table.iter().collect();
         let (red, purple) = (val(b"red"), val(b"purple"));
         assert_eq!(
@@ -250,7 +252,7 @@ mod test {
         let dir = tempdir().unwrap();
         let fp = dir.path().join("empty.sst");
 
-        write_new(&fp, &MemTable::new()).unwrap();
+        write_new(&fp, &mut MemTable::new().iter()).unwrap();
         assert!(fs::read(&fp).unwrap().is_empty());
 
         let sstable = SsTable::open(&fp).unwrap();
@@ -266,7 +268,7 @@ mod test {
 
         let dir = tempdir().unwrap();
         let fp = dir.path().join("sstable.sst");
-        write_new(&fp, &table).unwrap();
+        write_new(&fp, table.iter()).unwrap();
 
         let sstable = SsTable::open(&fp).unwrap();
         assert_eq!(sstable.get(b"apple"), Some(&val(b"red")));
@@ -286,7 +288,7 @@ mod test {
 
         let dir = tempdir().unwrap();
         let fp = dir.path().join("tomb.sst");
-        write_new(&fp, &table).unwrap();
+        write_new(&fp, table.iter()).unwrap();
 
         let sstable = SsTable::open(&fp).unwrap();
         assert_eq!(sstable.get(b"apple"), Some(&val(b"red")));
@@ -381,7 +383,7 @@ mod test {
 
         let dir = tempdir().unwrap();
         let fp = dir.path().join("search.sst");
-        write_new(&fp, &table).unwrap();
+        write_new(&fp, table.iter()).unwrap();
         let sstable = SsTable::open(&fp).unwrap();
 
         assert_eq!(sstable.get(b"apple"), Some(&val(b"red")));
@@ -404,7 +406,7 @@ mod test {
 
         let dir = tempdir().unwrap();
         let fp = dir.path().join("gaps.sst");
-        write_new(&fp, &table).unwrap();
+        write_new(&fp, table.iter()).unwrap();
         let sstable = SsTable::open(&fp).unwrap();
 
         assert_eq!(sstable.get(b""), None);
@@ -429,7 +431,7 @@ mod test {
 
         let dir = tempdir().unwrap();
         let fp = dir.path().join("three_way.sst");
-        write_new(&fp, &table).unwrap();
+        write_new(&fp, table.iter()).unwrap();
         let sstable = SsTable::open(&fp).unwrap();
 
         assert_eq!(sstable.get(b"apple"), Some(&Entry::Tombstone));
@@ -453,7 +455,7 @@ mod test {
 
         let dir = tempdir().unwrap();
         let fp = dir.path().join("bytes.sst");
-        write_new(&fp, &table).unwrap();
+        write_new(&fp, table.iter()).unwrap();
         let sstable = SsTable::open(&fp).unwrap();
 
         assert_eq!(sstable.get(b""), Some(&val(b"empty key")));
@@ -472,7 +474,7 @@ mod test {
 
         let dir = tempdir().unwrap();
         let fp = dir.path().join("independent.sst");
-        write_new(&fp, &table).unwrap();
+        write_new(&fp, table.iter()).unwrap();
         let sstable = SsTable::open(&fp).unwrap();
 
         table.put(b"apple".to_vec(), b"green".to_vec());
