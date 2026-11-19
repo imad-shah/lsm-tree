@@ -1,4 +1,4 @@
-//! Writes a [`MemTable`] to disk as an SSTable (Sorted String
+//! Writes a [`MemTable`](crate::memtable::Memtable) to disk as an SSTable (Sorted String
 //! Table) file, and reads it back with [`SsTable::open`].
 //!
 //! The file is just records (see [`record`]) back to back, in
@@ -104,7 +104,7 @@ impl SsTable {
 /// `path`.
 ///
 /// ```ignore
-/// let mut table = MemTable::new();
+/// let mut table = crate::memtable::MemTable::new();
 /// table.put(b"cherry".to_vec(), 1, b"red".to_vec());
 /// table.put(b"apple".to_vec(), 2, b"green".to_vec());
 /// table.remove(b"banana", 3);
@@ -141,6 +141,7 @@ pub(crate) fn write_new<'a>(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::memtable::MemTable;
     use std::io::ErrorKind;
     use tempfile::tempdir;
 
