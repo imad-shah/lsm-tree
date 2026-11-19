@@ -37,7 +37,7 @@ where
     type Item = (&'a [u8], &'a [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((ikey, entry)) = self.iter.next() {
+        for (ikey, entry) in self.iter.by_ref() {
             if ikey.seq > self.read_seq || self.last_user_key == Some(ikey.user_key.as_slice()) {
                 continue;
             }

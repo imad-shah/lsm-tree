@@ -43,11 +43,10 @@ impl<'a> Iterator for MergeIterator<'a> {
         let mut winner: Option<(usize, Self::Item)> = None;
 
         for (i, s) in self.sources.iter_mut().enumerate() {
-            if let Some(&contender) = s.peek() {
-                if winner.is_none_or(|(_, w)| contender.0 < w.0) {
+            if let Some(&contender) = s.peek()
+                && winner.is_none_or(|(_, w)| contender.0 < w.0) {
                     winner = Some((i, contender));
                 }
-            }
         }
 
         let (idx, _) = winner?;
