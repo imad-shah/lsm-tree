@@ -78,29 +78,23 @@ impl Engine {
     /// Searches the active [`MemTable`] first, then flushed [`SsTable`]s from
     /// newest to oldest, stopping at the first value or [`Entry::Tombstone`].
     pub(crate) fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        match self.memtable.get(key, self.seq) {
+        self.get_at(key, self.seq)
+    }
+
+    /// Looks up the live value for `key` visible at snapshot `read_seq`.
+    fn get_at(&self, key: &[u8], read_seq: SeqNum) -> Option<&[u8]> {
+        match self.memtable.get(key, read_seq) {
             Some(Entry::Value(bytes)) => return Some(bytes.as_slice()),
             Some(Entry::Tombstone) => return None,
             None => {}
         };
 
         for sst in self.sstables.iter().rev() {
-            match sst.table.get(key, self.seq) {
+            match sst.table.get(key, read_seq) {
                 Some(Entry::Value(bytes)) => return Some(bytes.as_slice()),
                 Some(Entry::Tombstone) => return None,
                 None => {}
             };
-        }
-        None
-    }
-
-    /// Looks up the live value for `key` visible at snapshot `read_seq`.
-    pub(crate) fn get_at(&self, key: &[u8], read_seq: SeqNum) -> Option<&[u8]> {
-        let visible = Visible::new(self.merged_entries(), read_seq);
-        for (user_key, value) in visible {
-            if user_key == key {
-                return Some(value);
-            }
         }
         None
     }
