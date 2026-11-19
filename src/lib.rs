@@ -5,3 +5,4 @@ mod memtable;
 mod merge;
 mod record;
 mod sstable;
+mod visible;
