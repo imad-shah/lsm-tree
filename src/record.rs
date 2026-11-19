@@ -24,6 +24,8 @@
 //! ```
 //!
 //! `seq` is a `u64` and both lengths are `u32`s, all stored little-endian.
+use crate::entry::Entry;
+use crate::keys::InternalKey;
 use std::num::TryFromIntError;
 
 /// Size of the record header
@@ -44,7 +46,7 @@ pub(crate) enum DecodeError {
     InvalidTombstone,
 }
 
-/// An [`InternalKey`](crate::keys::InternalKey) and its [`Entry`](crate::entry::Entry),
+/// An [`InternalKey`](InternalKey) and its [`Entry`](Entry),
 /// as stored in one record.
 ///
 /// Used internally to represent a single versioned record. The key pairs a user key
@@ -75,28 +77,25 @@ pub(crate) enum DecodeError {
 /// ```
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Record {
-    pub(crate) key: crate::keys::InternalKey,
-    pub(crate) value: crate::entry::Entry,
+    pub(crate) key: InternalKey,
+    pub(crate) value: Entry,
 }
 
 /// Encodes `key` and `value` into one record
 ///
-/// A [`Tombstone`](crate::entry::Entry::Tombstone) is written with kind `0x01`,
+/// A [`Tombstone`](Entry::Tombstone) is written with kind `0x01`,
 /// `value_len = 0` and no value bytes.
 ///
 /// # Errors
 ///
 /// Returns the conversion error if the key or value is longer than `u32::MAX` bytes.
-pub(crate) fn encode(
-    key: &crate::keys::InternalKey,
-    value: &crate::entry::Entry,
-) -> Result<Vec<u8>, TryFromIntError> {
+pub(crate) fn encode(key: &InternalKey, value: &Entry) -> Result<Vec<u8>, TryFromIntError> {
     let mut res: Vec<u8> = Vec::new();
 
     let key_len = &u32::try_from(key.user_key.len())?.to_le_bytes();
     let (kind, value_bytes): (&[u8], &[u8]) = match value {
-        crate::entry::Entry::Value(bytes) => (&[0x00], bytes.as_slice()),
-        crate::entry::Entry::Tombstone => (&[0x01], &[]),
+        Entry::Value(bytes) => (&[0x00], bytes.as_slice()),
+        Entry::Tombstone => (&[0x01], &[]),
     };
     let value_len = &u32::try_from(value_bytes.len())?.to_le_bytes();
     let seq_bytes = &key.seq.to_le_bytes();
@@ -170,11 +169,11 @@ pub(crate) fn decode(input: &[u8]) -> Result<Option<(Record, usize)>, DecodeErro
         return Err(DecodeError::TruncatedPayload);
     }
     let entry_value = match kind {
-        0 => crate::entry::Entry::Value(input[key_end..value_end].to_vec()),
-        1 => crate::entry::Entry::Tombstone,
+        0 => Entry::Value(input[key_end..value_end].to_vec()),
+        1 => Entry::Tombstone,
         _ => return Err(DecodeError::UnknownKind(kind)),
     };
-    let key = crate::keys::InternalKey {
+    let key = InternalKey {
         user_key: input[HEADER_LEN..key_end].to_vec(),
         seq,
     };
@@ -204,8 +203,7 @@ pub(crate) fn decode_all(mut input: &[u8]) -> Result<Vec<Record>, DecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entry::Entry;
-    use crate::keys::{InternalKey, SeqNum};
+    use crate::keys::SeqNum;
 
     fn val(bytes: &[u8]) -> Entry {
         Entry::Value(bytes.to_vec())
