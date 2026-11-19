@@ -82,7 +82,7 @@ impl Engine {
     }
 
     /// Looks up the live value for `key` visible at snapshot `read_seq`.
-    fn get_at(&self, key: &[u8], read_seq: SeqNum) -> Option<&[u8]> {
+    pub(crate) fn get_at(&self, key: &[u8], read_seq: SeqNum) -> Option<&[u8]> {
         match self.memtable.get(key, read_seq) {
             Some(Entry::Value(bytes)) => return Some(bytes.as_slice()),
             Some(Entry::Tombstone) => return None,
