@@ -1,3 +1,5 @@
+use crate::entry::Entry;
+use crate::keys::{InternalKey, SeqNum};
 use std::collections::BTreeMap;
 
 /// In-memory, sorted write buffer.
@@ -8,7 +10,7 @@ use std::collections::BTreeMap;
 /// flushed, the delete shadows older values for the same key in older SSTables
 #[derive(Default)]
 pub(crate) struct MemTable {
-    store: BTreeMap<crate::keys::InternalKey, crate::entry::Entry>,
+    store: BTreeMap<InternalKey, Entry>,
 }
 
 impl MemTable {
@@ -21,14 +23,10 @@ impl MemTable {
     /// - `Some(Entry::Value(_))`: the key has a live value
     /// - `Some(Entry::Tombstone)`: the key was deleted in this memtable
     /// - `None`: this memtable knows nothing about the key (an older SSTable might)
-    pub(crate) fn get(
-        &self,
-        key: &[u8],
-        read_seq: crate::keys::SeqNum,
-    ) -> Option<&crate::entry::Entry> {
+    pub(crate) fn get(&self, key: &[u8], read_seq: SeqNum) -> Option<&Entry> {
         self.store
             .range(
-                crate::keys::InternalKey {
+                InternalKey {
                     user_key: key.to_vec(),
                     seq: read_seq,
                 }..,
@@ -37,9 +35,9 @@ impl MemTable {
             .and_then(|(k, v)| (k.user_key == key).then_some(v))
     }
 
-    pub(crate) fn put(&mut self, key: Vec<u8>, seq: crate::keys::SeqNum, value: Vec<u8>) {
-        let key = crate::keys::InternalKey { user_key: key, seq };
-        let value = crate::entry::Entry::Value(value);
+    pub(crate) fn put(&mut self, key: Vec<u8>, seq: SeqNum, value: Vec<u8>) {
+        let key = InternalKey { user_key: key, seq };
+        let value = Entry::Value(value);
         self.store.insert(key, value);
     }
 
@@ -47,26 +45,22 @@ impl MemTable {
     ///
     /// This records a tombstone even if the key was never written to this
     /// memtable, because the key may still be live in an older SSTable
-    pub(crate) fn remove(&mut self, key: &[u8], seq: crate::keys::SeqNum) {
-        let key = crate::keys::InternalKey {
+    pub(crate) fn remove(&mut self, key: &[u8], seq: SeqNum) {
+        let key = InternalKey {
             user_key: key.to_vec(),
             seq,
         };
-        self.store.insert(key, crate::entry::Entry::Tombstone);
+        self.store.insert(key, Entry::Tombstone);
     }
 
     /// Iterates over every entry in ascending key order
-    pub(crate) fn iter(
-        &self,
-    ) -> impl Iterator<Item = (&crate::keys::InternalKey, &crate::entry::Entry)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&InternalKey, &Entry)> {
         self.store.iter()
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entry::Entry;
-    use crate::keys::{InternalKey, SeqNum};
 
     fn val(bytes: &[u8]) -> Entry {
         Entry::Value(bytes.to_vec())
