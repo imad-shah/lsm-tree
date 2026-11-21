@@ -11,7 +11,7 @@ use crate::entry::Entry;
 use crate::keys::SeqNum;
 use crate::memtable::MemTable;
 use crate::merge::{MergeIterator, Source};
-use crate::sstable::{SsTable, TableReadError, TableWriteError};
+use crate::sstable::{SsTable, SsTableReadError, TableWriteError};
 use crate::visible::Visible;
 use std::fs;
 use std::io;
@@ -19,18 +19,9 @@ use std::mem;
 use std::path::{Path, PathBuf};
 
 /// An open on-disk [`SsTable`] paired with its filesystem path.
-pub(crate) struct TableHandle {
+pub(crate) struct SsTableHandle {
     path: PathBuf,
-    table: SsTable,
-}
-
-/// Errors returned by [`Engine::compact_all`].
-#[derive(Debug)]
-pub(crate) enum CompactionError {
-    /// Writing the compacted output table failed.
-    Write(TableWriteError),
-    /// Opening the newly written output table failed.
-    Read(TableReadError),
+    sstable: SsTable,
 }
 
 /// Result of [`Engine::compact_all`], recording any old SSTable files that
@@ -40,12 +31,13 @@ pub(crate) struct CompactionOutcome {
     cleanup_failures: Vec<(PathBuf, io::Error)>,
 }
 
-/// Coordinates the active [`MemTable`], flushed [`SsTable`]s, and sequence
-/// number assignment.
-pub(crate) struct Engine {
-    memtable: MemTable,
-    sstables: Vec<TableHandle>,
-    seq: SeqNum,
+/// Errors returned by [`Engine::compact_all`].
+#[derive(Debug)]
+pub(crate) enum CompactionError {
+    /// Writing the compacted output table failed.
+    Write(TableWriteError),
+    /// Opening the newly written output table failed.
+    Read(SsTableReadError),
 }
 
 /// Errors returned by [`Engine::flush`].
@@ -54,7 +46,15 @@ pub(crate) enum FlushError {
     /// Writing the new SSTable file failed.
     Write(TableWriteError),
     /// Opening the newly flushed SSTable file failed.
-    Read(TableReadError),
+    Read(SsTableReadError),
+}
+
+/// Coordinates the active [`MemTable`], flushed [`SsTable`]s, and sequence
+/// number assignment.
+pub(crate) struct Engine {
+    memtable: MemTable,
+    sstables: Vec<SsTableHandle>,
+    seq: SeqNum,
 }
 
 impl Engine {
@@ -62,7 +62,7 @@ impl Engine {
     pub(crate) fn new() -> Self {
         Self {
             memtable: MemTable::new(),
-            sstables: vec![],
+            sstables: Vec::new(),
             seq: 0,
         }
     }
@@ -75,13 +75,16 @@ impl Engine {
 
     /// Looks up the latest live value for `key`.
     ///
-    /// Searches the active [`MemTable`] first, then flushed [`SsTable`]s from
-    /// newest to oldest, stopping at the first value or [`Entry::Tombstone`].
+    /// Same as [`Engine::get_at`] at the current sequence number.
     pub(crate) fn get(&self, key: &[u8]) -> Option<&[u8]> {
         self.get_at(key, self.seq)
     }
 
     /// Looks up the live value for `key` visible at snapshot `read_seq`.
+    ///
+    /// Searches the active [`MemTable`] first, then flushed [`SsTable`]s from newest
+    /// to oldest, stopping at the first version with `seq <= read_seq`. Returns `None`
+    /// if that version is an [`Entry::Tombstone`] or no version exists
     pub(crate) fn get_at(&self, key: &[u8], read_seq: SeqNum) -> Option<&[u8]> {
         match self.memtable.get(key, read_seq) {
             Some(Entry::Value(bytes)) => return Some(bytes.as_slice()),
@@ -89,8 +92,8 @@ impl Engine {
             None => {}
         };
 
-        for sst in self.sstables.iter().rev() {
-            match sst.table.get(key, read_seq) {
+        for handle in self.sstables.iter().rev() {
+            match handle.sstable.get(key, read_seq) {
                 Some(Entry::Value(bytes)) => return Some(bytes.as_slice()),
                 Some(Entry::Tombstone) => return None,
                 None => {}
@@ -114,10 +117,10 @@ impl Engine {
     /// - [`FlushError::Read`] if reopening the written SSTable fails
     pub(crate) fn flush(&mut self, path: &Path) -> Result<(), FlushError> {
         SsTable::write_new(path, self.memtable.iter()).map_err(FlushError::Write)?;
-        let table = SsTable::open(path).map_err(FlushError::Read)?;
-        self.sstables.push(TableHandle {
+        let sstable = SsTable::open(path).map_err(FlushError::Read)?;
+        self.sstables.push(SsTableHandle {
             path: path.to_path_buf(),
-            table,
+            sstable,
         });
         self.memtable = MemTable::new();
         Ok(())
@@ -156,49 +159,51 @@ impl Engine {
                 cleanup_failures: vec![],
             });
         }
-        let mut res = CompactionOutcome {
+        let mut outcome = CompactionOutcome {
             cleanup_failures: vec![],
         };
-        let mut last_kept_below_seq: Option<Vec<u8>> = None;
+        // the key of the most recent version seen with seq <= oldest_live
+        // any further version of the same key is older and dropped
+        let mut last_key_at_or_below: Option<Vec<u8>> = None;
         let gc_iter = self.merged_sstables().filter(move |(ikey, entry)| {
             if ikey.seq > oldest_live {
                 return true;
             }
 
-            if last_kept_below_seq.as_deref() == Some(ikey.user_key.as_slice()) {
+            if last_key_at_or_below.as_deref() == Some(ikey.user_key.as_slice()) {
                 return false;
             }
 
-            last_kept_below_seq = Some(ikey.user_key.clone());
+            last_key_at_or_below = Some(ikey.user_key.clone());
 
             !matches!(entry, Entry::Tombstone)
         });
         SsTable::write_new(output_path, gc_iter).map_err(CompactionError::Write)?;
         let replacement = SsTable::open(output_path).map_err(CompactionError::Read)?;
-        let replacement_handle = TableHandle {
+        let replacement_handle = SsTableHandle {
             path: output_path.to_path_buf(),
-            table: replacement,
+            sstable: replacement,
         };
         let old_handles = mem::replace(&mut self.sstables, vec![replacement_handle]);
 
-        for sstable in old_handles {
-            match fs::remove_file(&sstable.path) {
+        for handle in old_handles {
+            match fs::remove_file(&handle.path) {
                 Ok(()) => {}
                 Err(e) => {
-                    res.cleanup_failures.push((sstable.path.clone(), e));
+                    outcome.cleanup_failures.push((handle.path.clone(), e));
                 }
             }
         }
 
-        Ok(res)
+        Ok(outcome)
     }
     /// Merges the active [`MemTable`] and all on-disk [`SsTable`]s in [`InternalKey`](crate::keys::InternalKey) order.
     fn merged_entries(&self) -> MergeIterator<'_> {
         let mut sources: Vec<Source> = Vec::new();
         sources.push(Box::new(self.memtable.iter()));
 
-        for sst in self.sstables.iter().rev() {
-            sources.push(Box::new(sst.table.iter()));
+        for handle in self.sstables.iter().rev() {
+            sources.push(Box::new(handle.sstable.iter()));
         }
         MergeIterator::new(sources)
     }
@@ -206,22 +211,22 @@ impl Engine {
     /// Merges only the on-disk [`SsTable`]s in [`InternalKey`](crate::keys::InternalKey) order.
     fn merged_sstables(&self) -> MergeIterator<'_> {
         let mut sources: Vec<Source> = Vec::new();
-        for sst in self.sstables.iter().rev() {
-            sources.push(Box::new(sst.table.iter()));
+        for handle in self.sstables.iter().rev() {
+            sources.push(Box::new(handle.sstable.iter()));
         }
         MergeIterator::new(sources)
     }
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::keys::InternalKey;
     use std::io::ErrorKind;
     use tempfile::tempdir;
 
     #[test]
-    fn seq_test() {
+    fn get_at_reads_older_version_get_reads_newest() {
         let mut eng = Engine::new();
 
         eng.put(b"apple".to_vec(), b"red".to_vec());
@@ -246,7 +251,7 @@ mod test {
         assert!(outcome.cleanup_failures.is_empty());
         assert_eq!(eng.sstables.len(), 1);
         let got: Vec<(&[u8], SeqNum, &Entry)> = eng.sstables[0]
-            .table
+            .sstable
             .iter()
             .map(|(k, e)| (k.user_key.as_slice(), k.seq, e))
             .collect();
@@ -264,10 +269,8 @@ mod test {
         // apple@3 -> red
         // apple@7 -> green
         // apple@9 -> tombstone
-        // compact all with time 8, should hold 1 above (apple@9) and 1 below (apple@7)
-        //
-        // compact all no time given, should hold nothing because (apple@9) is most recent and
-        // deleted apple
+        // compact_all with `oldest_live = 8` will keep apple@9 (above 8) and apple@7 (newest at
+        // or below 8), and drops apple@3
         let mut eng = Engine::new();
         let dir = tempdir().unwrap();
         let fp1 = dir.path().join("first.sst");
@@ -291,14 +294,14 @@ mod test {
         eng.flush(&fp3).unwrap(); // flushed {apple@9 -> tomb} to sstable3
 
         // memtable is empty, 3 sstables with different values
-        let oldest_alive = 8;
-        let outcome = eng.compact_all(&fp4, oldest_alive).unwrap();
+        let oldest_live = 8;
+        let outcome = eng.compact_all(&fp4, oldest_live).unwrap();
 
         // 1. verify the inmemory representation
         assert!(outcome.cleanup_failures.is_empty());
         assert_eq!(eng.sstables.len(), 1);
         let got: Vec<(&[u8], SeqNum, &Entry)> = eng.sstables[0]
-            .table
+            .sstable
             .iter()
             .filter(|(k, _)| k.user_key == b"apple")
             .map(|(k, e)| (k.user_key.as_slice(), k.seq, e))
@@ -311,7 +314,7 @@ mod test {
             ]
         );
 
-        // 2. verify the actual file got wrote to
+        // 2. verify the file on disk has the same contents
         let table = SsTable::open(&fp4).unwrap();
         let got: Vec<(&[u8], SeqNum, &Entry)> = table
             .iter()
@@ -461,7 +464,7 @@ mod test {
         assert!(!fp1.exists());
         assert!(!fp2.exists());
 
-        let replacement = &eng.sstables[0].table;
+        let replacement = &eng.sstables[0].sstable;
         let stored: Vec<_> = replacement.iter().collect();
         assert_eq!(
             stored,
