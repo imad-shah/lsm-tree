@@ -4,10 +4,12 @@ use std::collections::BTreeMap;
 
 /// In-memory, sorted write buffer.
 ///
-/// Every key maps to an [`Entry`](crate::entry::Entry): either a live value or a
-/// [`Tombstone`](crate::entry::Entry::Tombstone). The tombstone records that the key was
-/// deleted. Tombstones are kept so that when the memtable is
-/// flushed, the delete shadows older values for the same key in older SSTables
+/// Every [`InternalKey`] (user key + sequence number) maps to an [`Entry`], which is either a
+/// live value or a [`Tombstone`](Entry::Tombstone). Each write adds a new version instead
+/// of overwriting, so older versions stay readable at earlier sequence numbers
+///
+/// Tombstones are kept so that when the memtable is flushed, the delete shadows older
+/// versions of the same key in older SSTables
 #[derive(Default)]
 pub(crate) struct MemTable {
     store: BTreeMap<InternalKey, Entry>,
@@ -18,11 +20,12 @@ impl MemTable {
         Self::default()
     }
 
-    /// Returns the entry stored for `key`.
+    /// Returns the newest entry for `key` with `seq <= read_seq`.
     ///
-    /// - `Some(Entry::Value(_))`: the key has a live value
-    /// - `Some(Entry::Tombstone)`: the key was deleted in this memtable
-    /// - `None`: this memtable knows nothing about the key (an older SSTable might)
+    /// - `Some(Entry::Value(_))`: the key has a live value at `read_seq`
+    /// - `Some(Entry::Tombstone)`: the key was deleted at or before `read_seq`
+    /// - `None`: this memtable has no version of `key` at or before `read_seq`
+    ///   (an older SSTable might)
     pub(crate) fn get(&self, key: &[u8], read_seq: SeqNum) -> Option<&Entry> {
         self.store
             .range(
