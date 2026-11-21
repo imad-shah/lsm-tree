@@ -44,9 +44,10 @@ impl<'a> Iterator for MergeIterator<'a> {
 
         for (i, s) in self.sources.iter_mut().enumerate() {
             if let Some(&contender) = s.peek()
-                && winner.is_none_or(|(_, w)| contender.0 < w.0) {
-                    winner = Some((i, contender));
-                }
+                && winner.is_none_or(|(_, w)| contender.0 < w.0)
+            {
+                winner = Some((i, contender));
+            }
         }
 
         let (idx, _) = winner?;
@@ -181,7 +182,7 @@ mod tests {
         let mut flushed = MemTable::new();
         flushed.put(b"apple".to_vec(), 1, b"green".to_vec());
         flushed.put(b"banana".to_vec(), 2, b"yellow".to_vec());
-        sstable::write_new(&sst_path, flushed.iter()).unwrap();
+        SsTable::write_new(&sst_path, flushed.iter()).unwrap();
         let sst = SsTable::open(&sst_path).unwrap();
 
         let mut active = MemTable::new();

@@ -191,7 +191,7 @@ mod tests {
         flushed.put(b"apple".to_vec(), 1, b"green".to_vec());
         flushed.put(b"banana".to_vec(), 2, b"yellow".to_vec());
         flushed.put(b"durian".to_vec(), 3, b"spiky".to_vec());
-        sstable::write_new(&sst_path, flushed.iter()).unwrap();
+        SsTable::write_new(&sst_path, flushed.iter()).unwrap();
         let sst = SsTable::open(&sst_path).unwrap();
 
         let mut active = MemTable::new();

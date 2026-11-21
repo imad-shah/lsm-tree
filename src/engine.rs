@@ -11,7 +11,7 @@ use crate::entry::Entry;
 use crate::keys::SeqNum;
 use crate::memtable::MemTable;
 use crate::merge::{MergeIterator, Source};
-use crate::sstable::{self, SsTable, TableReadError, TableWriteError};
+use crate::sstable::{SsTable, TableReadError, TableWriteError};
 use crate::visible::Visible;
 use std::fs;
 use std::io;
@@ -113,7 +113,7 @@ impl Engine {
     /// - [`FlushError::Write`] if creating or writing `path` fails
     /// - [`FlushError::Read`] if reopening the written SSTable fails
     pub(crate) fn flush(&mut self, path: &Path) -> Result<(), FlushError> {
-        sstable::write_new(path, self.memtable.iter()).map_err(FlushError::Write)?;
+        SsTable::write_new(path, self.memtable.iter()).map_err(FlushError::Write)?;
         let table = SsTable::open(path).map_err(FlushError::Read)?;
         self.sstables.push(TableHandle {
             path: path.to_path_buf(),
@@ -173,7 +173,7 @@ impl Engine {
 
             !matches!(entry, Entry::Tombstone)
         });
-        sstable::write_new(output_path, gc_iter).map_err(CompactionError::Write)?;
+        SsTable::write_new(output_path, gc_iter).map_err(CompactionError::Write)?;
         let replacement = SsTable::open(output_path).map_err(CompactionError::Read)?;
         let replacement_handle = TableHandle {
             path: output_path.to_path_buf(),
