@@ -22,9 +22,9 @@ impl PartialOrd for InternalKey {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     #[test]
-    fn test_sorting() {
+    fn orders_by_user_key_asc_then_seq_desc() {
         let mut values = [
             crate::keys::InternalKey {
                 user_key: b"banana".to_vec(),
@@ -68,7 +68,7 @@ mod test {
     }
 
     #[test]
-    fn test_prefix_sorting() {
+    fn shorter_prefix_sorts_first_regardless_of_seq() {
         let mut value = [
             crate::keys::InternalKey {
                 user_key: b"ab".to_vec(),
