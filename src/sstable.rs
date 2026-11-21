@@ -1,6 +1,6 @@
-//! Writes a [`MemTable`](crate::memtable::Memtable) to disk as an SSTable (Sorted String
-//! Table) file, and reads it back with [`SsTable::open`].
-//!
+//! Writes sorted entries (from a [`MemTable`](crate::memtable::MemTable) flush or a
+//! compaction) to disk as an SSTable (Sorted String Table) file, and reads it back
+//! with [`SsTable::open`]
 //! The file is just records (see [`record`]) back to back, in
 //! ascending [`InternalKey`] order (`user_key` ascending,
 //! `seq` descending). Deleted keys are written as tombstone records so they
@@ -15,8 +15,8 @@
 //!         └───────────────────┴──────────────────────┴──────────────────┘
 //! ```
 //! note:
-//! atm, there is no index or footer, so finding a key means reading records from
-//! the start of the file (WIP)
+//! atm there is no index or footer yet, so [`SsTable::open`] reads and decodes the whole
+//! file into memory, and lookups binary search those records (WIP)
 
 use crate::entry::Entry;
 use crate::keys::{InternalKey, SeqNum};
@@ -38,7 +38,7 @@ pub(crate) enum TableWriteError {
 }
 
 #[derive(Debug)]
-pub(crate) enum TableReadError {
+pub(crate) enum SsTableReadError {
     /// The file couldn't be read
     Io(io::Error),
     /// A record in the file is malformed (truncated, unknown kind, bad tombstone, etc)
@@ -57,16 +57,16 @@ impl SsTable {
     ///
     /// # Errors
     ///
-    /// - [`TableReadError::Io`] if the file can't be read
-    /// - [`TableReadError::Decode`] if any record is malformed
-    /// - [`TableReadError::InvalidKeyOrder`] if internal keys aren't strictly increasing
-    pub(crate) fn open(path: &Path) -> Result<Self, TableReadError> {
-        let file_contents = fs::read(path).map_err(TableReadError::Io)?;
-        let decoded = record::decode_all(&file_contents).map_err(TableReadError::Decode)?;
+    /// - [`SsTableReadError::Io`] if the file can't be read
+    /// - [`SsTableReadError::Decode`] if any record is malformed
+    /// - [`SsTableReadError::InvalidKeyOrder`] if internal keys aren't strictly increasing
+    pub(crate) fn open(path: &Path) -> Result<Self, SsTableReadError> {
+        let file_contents = fs::read(path).map_err(SsTableReadError::Io)?;
+        let decoded = record::decode_all(&file_contents).map_err(SsTableReadError::Decode)?;
 
         for i in 1..decoded.len() {
             if decoded[i].key <= decoded[i - 1].key {
-                return Err(TableReadError::InvalidKeyOrder);
+                return Err(SsTableReadError::InvalidKeyOrder);
             }
         }
 
@@ -99,19 +99,15 @@ impl SsTable {
         self.records.iter().map(|r| (&r.key, &r.value))
     }
 
-    /// Writes every entry of `table`, tombstones included, into a new file at
-    /// `path`.
+    /// Writes every entry from `entries`, tombstones included, into a new file at
+    /// `path`
+    ///
+    /// `entries` must be in ascending [`InternalKey`] order. This is not checked here,
+    /// but [`SsTable::open`] rejects a file that is out of order
     ///
     /// ```ignore
-    /// let mut table = crate::memtable::MemTable::new();
-    /// table.put(b"cherry".to_vec(), 1, b"red".to_vec());
-    /// table.put(b"apple".to_vec(), 2, b"green".to_vec());
-    /// table.remove(b"banana", 3);
-    ///
-    /// write_new(Path::new("data/000001.sst"), table.iter())?;
-    /// // New file contains: [(apple, 2) -> green][(banana, 3) -> tombstone][(cherry, 1) -> red]
+    /// SsTable::write_new(Path::new("data/000001.sst"), table.iter())?;
     /// ```
-    ///
     /// # Errors
     ///
     /// - [`TableWriteError::Io`] with kind `AlreadyExists` if a file is already at
@@ -139,7 +135,7 @@ impl SsTable {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::memtable::MemTable;
     use std::io::ErrorKind;
@@ -360,7 +356,7 @@ mod test {
         let dir = tempdir().unwrap();
         let err = SsTable::open(&dir.path().join("nope.sst")).err().unwrap();
         assert!(
-            matches!(&err, TableReadError::Io(e) if e.kind() == ErrorKind::NotFound),
+            matches!(&err, SsTableReadError::Io(e) if e.kind() == ErrorKind::NotFound),
             "got {err:?}"
         );
     }
@@ -377,7 +373,7 @@ mod test {
 
         let err = SsTable::open(&fp).err().unwrap();
         assert!(
-            matches!(err, TableReadError::InvalidKeyOrder),
+            matches!(err, SsTableReadError::InvalidKeyOrder),
             "got {err:?}"
         );
     }
@@ -394,7 +390,7 @@ mod test {
         .unwrap();
         assert!(matches!(
             SsTable::open(&dup_fp).err().unwrap(),
-            TableReadError::InvalidKeyOrder
+            SsTableReadError::InvalidKeyOrder
         ));
 
         let asc_seq_fp = dir.path().join("asc_seq.sst");
@@ -405,7 +401,7 @@ mod test {
         .unwrap();
         assert!(matches!(
             SsTable::open(&asc_seq_fp).err().unwrap(),
-            TableReadError::InvalidKeyOrder
+            SsTableReadError::InvalidKeyOrder
         ));
     }
 
@@ -419,7 +415,10 @@ mod test {
 
         let err = SsTable::open(&fp).err().unwrap();
         assert!(
-            matches!(err, TableReadError::Decode(DecodeError::UnknownKind(0x05))),
+            matches!(
+                err,
+                SsTableReadError::Decode(DecodeError::UnknownKind(0x05))
+            ),
             "got {err:?}"
         );
     }
@@ -434,7 +433,7 @@ mod test {
 
         let err = SsTable::open(&fp).err().unwrap();
         assert!(
-            matches!(err, TableReadError::Decode(DecodeError::TruncatedPayload)),
+            matches!(err, SsTableReadError::Decode(DecodeError::TruncatedPayload)),
             "got {err:?}"
         );
     }
@@ -584,7 +583,7 @@ mod test {
 
             let err = SsTable::open(&fp).err().unwrap();
             assert!(
-                matches!(err, TableReadError::InvalidKeyOrder),
+                matches!(err, SsTableReadError::InvalidKeyOrder),
                 "{name}: got {err:?}"
             );
         }
@@ -600,7 +599,7 @@ mod test {
 
         let err = SsTable::open(&fp).err().unwrap();
         assert!(
-            matches!(err, TableReadError::Decode(DecodeError::TruncatedHeader)),
+            matches!(err, SsTableReadError::Decode(DecodeError::TruncatedHeader)),
             "got {err:?}"
         );
     }
