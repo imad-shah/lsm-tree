@@ -18,9 +18,10 @@ Every write gets a sequence number and is kept as a new version, so reads can se
     ├── keys.rs       # internal key (user key + sequence number) and its ordering
     ├── memtable.rs   # in-memory sorted write buffer
     ├── merge.rs      # merges sorted sources into one stream of all versions
-    ├── visible.rs    # picks the version of each key visible at a sequence number
     ├── record.rs     # on-disk record format, encode/decode
-    └── sstable.rs    # writes and reads sorted on-disk tables
+    ├── sstable.rs    # writes and reads sorted on-disk tables
+    ├── test_util.rs  # shared test helpers for building InternalKey and Entry values
+    └── visible.rs    # picks the version of each key visible at a sequence number
 ```
 
 ## Testing
