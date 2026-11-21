@@ -1,56 +1,56 @@
 //! LSM-tree storage engine coordinating an in-memory [`MemTable`] and on-disk
-//! [`SsTable`] files with MVCC snapshot reads and full compaction.
+//! [`SsTable`] files with MVCC snapshot reads and full compaction
 //!
 //! Writes receive monotonically increasing sequence numbers (`1, 2, ...`) and
 //! land in the active [`MemTable`]. [`Engine::flush`] writes the active memtable
 //! to a new [`SsTable`] on disk, while [`Engine::compact_all`] merges all
 //! on-disk tables and garbage-collects versions shadowed at or below
-//! `oldest_live`.
+//! `oldest_live`
 
 use crate::entry::Entry;
 use crate::keys::SeqNum;
 use crate::memtable::MemTable;
 use crate::merge::{MergeIterator, Source};
-use crate::sstable::{SsTable, SsTableReadError, TableWriteError};
+use crate::sstable::{SsTable, SsTableReadError, SsTableWriteError};
 use crate::visible::Visible;
 use std::fs;
 use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
 
-/// An open on-disk [`SsTable`] paired with its filesystem path.
+/// An open on-disk [`SsTable`] paired with its filesystem path
 pub(crate) struct SsTableHandle {
     path: PathBuf,
     sstable: SsTable,
 }
 
 /// Result of [`Engine::compact_all`], recording any old SSTable files that
-/// could not be deleted after the replacement table was installed.
+/// could not be deleted after the replacement table was installed
 #[derive(Debug)]
 pub(crate) struct CompactionOutcome {
     cleanup_failures: Vec<(PathBuf, io::Error)>,
 }
 
-/// Errors returned by [`Engine::compact_all`].
+/// Errors returned by [`Engine::compact_all`]
 #[derive(Debug)]
 pub(crate) enum CompactionError {
-    /// Writing the compacted output table failed.
-    Write(TableWriteError),
-    /// Opening the newly written output table failed.
+    /// Writing the compacted output table failed
+    Write(SsTableWriteError),
+    /// Opening the newly written output table failed
     Read(SsTableReadError),
 }
 
-/// Errors returned by [`Engine::flush`].
+/// Errors returned by [`Engine::flush`]
 #[derive(Debug)]
 pub(crate) enum FlushError {
-    /// Writing the new SSTable file failed.
-    Write(TableWriteError),
-    /// Opening the newly flushed SSTable file failed.
+    /// Writing the new SSTable file failed
+    Write(SsTableWriteError),
+    /// Opening the newly flushed SSTable file failed
     Read(SsTableReadError),
 }
 
 /// Coordinates the active [`MemTable`], flushed [`SsTable`]s, and sequence
-/// number assignment.
+/// number assignment
 pub(crate) struct Engine {
     memtable: MemTable,
     sstables: Vec<SsTableHandle>,
@@ -58,7 +58,7 @@ pub(crate) struct Engine {
 }
 
 impl Engine {
-    /// Creates an empty [`Engine`] at sequence number `0`.
+    /// Creates an empty [`Engine`] at sequence number `0`
     pub(crate) fn new() -> Self {
         Self {
             memtable: MemTable::new(),
@@ -67,20 +67,20 @@ impl Engine {
         }
     }
 
-    /// Inserts or updates `key` with `value` at the next sequence number.
+    /// Inserts or updates `key` with `value` at the next sequence number
     pub(crate) fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
         self.seq += 1;
         self.memtable.put(key, self.seq, value);
     }
 
-    /// Looks up the latest live value for `key`.
+    /// Looks up the latest live value for `key`
     ///
-    /// Same as [`Engine::get_at`] at the current sequence number.
+    /// Same as [`Engine::get_at`] at the current sequence number
     pub(crate) fn get(&self, key: &[u8]) -> Option<&[u8]> {
         self.get_at(key, self.seq)
     }
 
-    /// Looks up the live value for `key` visible at snapshot `read_seq`.
+    /// Looks up the live value for `key` visible at snapshot `read_seq`
     ///
     /// Searches the active [`MemTable`] first, then flushed [`SsTable`]s from newest
     /// to oldest, stopping at the first version with `seq <= read_seq`. Returns `None`
@@ -102,14 +102,14 @@ impl Engine {
         None
     }
 
-    /// Deletes `key` by writing an [`Entry::Tombstone`] at the next sequence number.
+    /// Deletes `key` by writing an [`Entry::Tombstone`] at the next sequence number
     pub(crate) fn remove(&mut self, key: &[u8]) {
         self.seq += 1;
         self.memtable.remove(key, self.seq);
     }
 
     /// Flushes the active [`MemTable`] to a new SSTable at `path` and resets
-    /// the active memtable.
+    /// the active memtable
     ///
     /// # Errors
     ///
@@ -126,24 +126,24 @@ impl Engine {
         Ok(())
     }
 
-    /// Iterates over all live `(key, value)` pairs visible at the latest sequence number.
+    /// Iterates over all live `(key, value)` pairs visible at the latest sequence number
     pub(crate) fn scan(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
         Visible::new(self.merged_entries(), self.seq)
     }
 
-    /// Iterates over all live `(key, value)` pairs visible at snapshot `read_seq`.
+    /// Iterates over all live `(key, value)` pairs visible at snapshot `read_seq`
     pub(crate) fn scan_at(&self, read_seq: SeqNum) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
         Visible::new(self.merged_entries(), read_seq)
     }
 
     /// Merges all on-disk [`SsTable`]s into a single compacted table at `output_path`
-    /// and removes the old SSTable files.
+    /// and removes the old SSTable files
     ///
     /// Retention rules per user key (newest to oldest):
-    /// - Keeps every version with `seq > oldest_live`.
+    /// - Keeps every version with `seq > oldest_live`
     /// - Keeps the newest version with `seq <= oldest_live` if it is a live value,
-    ///   or drops it if it is a tombstone.
-    /// - Drops all older versions.
+    ///   or drops it if it is a tombstone
+    /// - Drops all older versions
     ///
     /// # Errors
     ///
@@ -197,7 +197,8 @@ impl Engine {
 
         Ok(outcome)
     }
-    /// Merges the active [`MemTable`] and all on-disk [`SsTable`]s in [`InternalKey`](crate::keys::InternalKey) order.
+
+    /// Merges the active [`MemTable`] and all on-disk [`SsTable`]s in [`InternalKey`](crate::keys::InternalKey) order
     fn merged_entries(&self) -> MergeIterator<'_> {
         let mut sources: Vec<Source> = Vec::new();
         sources.push(Box::new(self.memtable.iter()));
@@ -208,7 +209,7 @@ impl Engine {
         MergeIterator::new(sources)
     }
 
-    /// Merges only the on-disk [`SsTable`]s in [`InternalKey`](crate::keys::InternalKey) order.
+    /// Merges only the on-disk [`SsTable`]s in [`InternalKey`](crate::keys::InternalKey) order
     fn merged_sstables(&self) -> MergeIterator<'_> {
         let mut sources: Vec<Source> = Vec::new();
         for handle in self.sstables.iter().rev() {
@@ -237,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn one_table_no_drop_sucs() {
+    fn compact_all_single_table_keeps_all_live_entries() {
         let mut eng = Engine::new();
         let dir = tempdir().unwrap();
         let fp1 = dir.path().join("first.sst");
@@ -265,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn full_mvcc_test() {
+    fn compact_all_keeps_versions_above_and_newest_below_oldest_live() {
         // apple@3 -> red
         // apple@7 -> green
         // apple@9 -> tombstone
@@ -331,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn integration_test() {
+    fn get_follows_put_flush_remove_put_sequence() {
         let mut eng = Engine::new();
         let dir = tempdir().unwrap();
         let fp1 = dir.path().join("first.sst");
@@ -353,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn integration_with_scan() {
+    fn scan_merges_memtable_and_sstables_skipping_tombstones() {
         let mut eng = Engine::new();
         let dir = tempdir().unwrap();
         let fp1 = dir.path().join("first.sst");
@@ -434,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn integration_test_with_compact_all_drops_obsolete_versions_and_tombstones() {
+    fn compact_all_drops_obsolete_versions_and_tombstones() {
         let mut eng = Engine::new();
         let dir = tempdir().unwrap();
         let fp1 = dir.path().join("first.sst");
@@ -452,8 +453,8 @@ mod tests {
 
         eng.put(b"banana".to_vec(), b"blue".to_vec()); // seq 6 (still in memtable)
 
-        // With oldest_live = 5, all SSTable records have seq <= 5:
-        // - apple's newest SSTable record is tombstone (seq 4 <= 5), so apple is dropped completely
+        // with oldest_live = 5, all sstable records have seq <= 5:
+        // - apple's newest sstable record is tombstone (seq 4 <= 5), so apple is dropped completely
         // - banana (seq 2), cherry (seq 5), and pear (seq 3) survive
         let outcome = eng.compact_all(&fp3, 5).unwrap();
         assert!(outcome.cleanup_failures.is_empty());
@@ -493,7 +494,7 @@ mod tests {
             ]
         );
 
-        // Memtable entry (banana, 6) still shadows compacted (banana, 2)
+        // memtable entry (banana, 6) still shadows compacted (banana, 2)
         assert_eq!(eng.get(b"banana"), Some(b"blue".as_slice()));
         assert_eq!(eng.get_at(b"banana", 5), Some(b"yellow".as_slice()));
         assert_eq!(eng.get(b"apple"), None);
@@ -514,7 +515,7 @@ mod tests {
         eng.remove(b"apple"); // seq 3
         eng.flush(&fp2).unwrap();
 
-        // Snapshot at seq 1 is still active (oldest_live = 1):
+        // snapshot at seq 1 is still active (oldest_live = 1):
         // - (apple, 3) tombstone and (apple, 2) v2 have seq > 1 -> kept
         // - (apple, 1) v1 is first version <= 1 -> kept
         let outcome = eng.compact_all(&fp3, 1).unwrap();
@@ -595,7 +596,7 @@ mod tests {
         eng.put(b"banana".to_vec(), b"yellow".to_vec());
         let err = eng.flush(&fp).unwrap_err();
         assert!(
-            matches!(&err, FlushError::Write(TableWriteError::Io(e))
+            matches!(&err, FlushError::Write(SsTableWriteError::Io(e))
                 if e.kind() == ErrorKind::AlreadyExists),
             "got {err:?}"
         );
@@ -692,7 +693,7 @@ mod tests {
             .flush(&dir.path().join("missing_dir").join("1.sst"))
             .unwrap_err();
         assert!(
-            matches!(&err, FlushError::Write(TableWriteError::Io(e))
+            matches!(&err, FlushError::Write(SsTableWriteError::Io(e))
                 if e.kind() == ErrorKind::NotFound),
             "got {err:?}"
         );

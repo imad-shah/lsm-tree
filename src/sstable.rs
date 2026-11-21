@@ -1,11 +1,12 @@
 //! Writes sorted entries (from a [`MemTable`](crate::memtable::MemTable) flush or a
 //! compaction) to disk as an SSTable (Sorted String Table) file, and reads it back
 //! with [`SsTable::open`]
-//! The file is just records (see [`record`]) back to back, in
-//! ascending [`InternalKey`] order (`user_key` ascending,
-//! `seq` descending). Deleted keys are written as tombstone records so they
-//! keep shadowing older SSTables. A file holding three entries, the last one a
-//! tombstone, looks like this:
+//!
+//! The file is just records (see [`record`]) back to back, in ascending [`InternalKey`]
+//! order (`user_key` ascending, `seq` descending). Deleted keys are written as tombstone
+//! records so they keep shadowing older SSTables
+//!
+//! A file holding three entries, the last one a tombstone, looks like this:
 //!
 //! ```text
 //! offset: 0                   27                     56                 79
@@ -14,6 +15,7 @@
 //!         │ 17 + 5 + 5 = 27 B │ 17 + 6 + 6 = 29 B    │ 17 + 6 + 0 = 23B │
 //!         └───────────────────┴──────────────────────┴──────────────────┘
 //! ```
+//!
 //! note:
 //! atm there is no index or footer yet, so [`SsTable::open`] reads and decodes the whole
 //! file into memory, and lookups binary search those records (WIP)
@@ -28,12 +30,12 @@ use std::num::TryFromIntError;
 use std::path::Path;
 
 #[derive(Debug)]
-pub(crate) enum TableWriteError {
+pub(crate) enum SsTableWriteError {
     /// A key or value was longer than `u32::MAX` bytes, so its length doesn't fit in
-    /// the record header. Carries the original conversion error.
+    /// the record header. Carries the original conversion error
     Encode(TryFromIntError),
     /// The file couldn't be created or written. Check `.kind()` on the inner error:
-    /// `ErrorKind::AlreadyExists` means a file was already at that path.
+    /// `ErrorKind::AlreadyExists` means a file was already at that path
     Io(io::Error),
 }
 
@@ -47,13 +49,13 @@ pub(crate) enum SsTableReadError {
     InvalidKeyOrder,
 }
 
-/// An SSTable loaded fully into memory, records in ascending [`InternalKey`] order.
+/// An SSTable loaded fully into memory, records in ascending [`InternalKey`] order
 pub(crate) struct SsTable {
     records: Vec<Record>,
 }
 
 impl SsTable {
-    /// Reads and decodes every record in the file at `path`.
+    /// Reads and decodes every record in the file at `path`
     ///
     /// # Errors
     ///
@@ -73,7 +75,7 @@ impl SsTable {
         Ok(SsTable { records: decoded })
     }
 
-    /// Looks up `key` at snapshot `read_seq` in this table.
+    /// Looks up `key` at snapshot `read_seq` in this table
     ///
     /// - `Some(Entry::Value(_))`: the key is live at `read_seq` in this table
     /// - `Some(Entry::Tombstone)`: the key was deleted; callers must stop
@@ -91,12 +93,12 @@ impl SsTable {
         self.records
             .get(i)
             .filter(|r| r.key.user_key == key)
-            .map(|r| &r.value)
+            .map(|r| &r.entry)
     }
 
     /// Iterates over every entry in ascending [`InternalKey`] order
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&InternalKey, &Entry)> {
-        self.records.iter().map(|r| (&r.key, &r.value))
+        self.records.iter().map(|r| (&r.key, &r.entry))
     }
 
     /// Writes every entry from `entries`, tombstones included, into a new file at
@@ -108,27 +110,28 @@ impl SsTable {
     /// ```ignore
     /// SsTable::write_new(Path::new("data/000001.sst"), table.iter())?;
     /// ```
+    ///
     /// # Errors
     ///
-    /// - [`TableWriteError::Io`] with kind `AlreadyExists` if a file is already at
+    /// - [`SsTableWriteError::Io`] with kind `AlreadyExists` if a file is already at
     ///   `path`
-    /// - [`TableWriteError::Io`] for any other failure to open or write the file
+    /// - [`SsTableWriteError::Io`] for any other failure to open or write the file
     ///   (missing directory, no permission, disk full, etc)
-    /// - [`TableWriteError::Encode`] if a key or value is longer than `u32::MAX` bytes
+    /// - [`SsTableWriteError::Encode`] if a key or value is longer than `u32::MAX` bytes
     pub(crate) fn write_new<'a>(
         path: &Path,
         entries: impl Iterator<Item = (&'a InternalKey, &'a Entry)>,
-    ) -> Result<(), TableWriteError> {
+    ) -> Result<(), SsTableWriteError> {
         let mut f = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)
-            .map_err(TableWriteError::Io)?;
+            .map_err(SsTableWriteError::Io)?;
 
-        for (key, value) in entries {
-            let encoded = record::encode(key, value).map_err(TableWriteError::Encode)?;
+        for (key, entry) in entries {
+            let encoded = record::encode(key, entry).map_err(SsTableWriteError::Encode)?;
             f.write_all(encoded.as_slice())
-                .map_err(TableWriteError::Io)?;
+                .map_err(SsTableWriteError::Io)?;
         }
         Ok(())
     }
@@ -138,19 +141,9 @@ impl SsTable {
 mod tests {
     use super::*;
     use crate::memtable::MemTable;
+    use crate::test_util::{ikey, val};
     use std::io::ErrorKind;
     use tempfile::tempdir;
-
-    fn val(bytes: &[u8]) -> Entry {
-        Entry::Value(bytes.to_vec())
-    }
-
-    fn ikey(bytes: &[u8], seq: SeqNum) -> InternalKey {
-        InternalKey {
-            user_key: bytes.to_vec(),
-            seq,
-        }
-    }
 
     fn encode_all(records: &[(&[u8], SeqNum, Entry)]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -181,19 +174,19 @@ mod tests {
             vec![
                 Record {
                     key: ikey(b"apple", 2),
-                    value: val(b"green"),
+                    entry: val(b"green"),
                 },
                 Record {
                     key: ikey(b"banana", 3),
-                    value: val(b"yellow"),
+                    entry: val(b"yellow"),
                 },
                 Record {
                     key: ikey(b"blueberry", 4),
-                    value: Entry::Tombstone,
+                    entry: Entry::Tombstone,
                 },
                 Record {
                     key: ikey(b"cherry", 1),
-                    value: val(b"red"),
+                    entry: val(b"red"),
                 },
             ]
         );
@@ -217,7 +210,7 @@ mod tests {
     #[test]
     fn existing_destination_fails_without_overwriting() {
         let dir = tempdir().unwrap();
-        let fp = dir.path().join("existing.bin");
+        let fp = dir.path().join("existing.sst");
 
         let original_contents = b"already contains contents";
         fs::write(&fp, original_contents).unwrap();
@@ -227,8 +220,8 @@ mod tests {
 
         let err = SsTable::write_new(&fp, table.iter()).unwrap_err();
         match err {
-            TableWriteError::Io(io_err) => assert_eq!(io_err.kind(), ErrorKind::AlreadyExists),
-            other => panic!("expected TableWriteError::Io(AlreadyExists), got {other:?}"),
+            SsTableWriteError::Io(io_err) => assert_eq!(io_err.kind(), ErrorKind::AlreadyExists),
+            other => panic!("expected SsTableWriteError::Io(AlreadyExists), got {other:?}"),
         }
         let on_disk = fs::read(&fp).unwrap();
         assert_eq!(on_disk, original_contents);
@@ -237,7 +230,7 @@ mod tests {
     #[test]
     fn memtable_preserved_after_write() {
         let dir = tempdir().unwrap();
-        let fp = dir.path().join("preserved.bin");
+        let fp = dir.path().join("preserved.sst");
 
         let mut table = MemTable::new();
         table.put(b"apple".to_vec(), 1, b"red".to_vec());
