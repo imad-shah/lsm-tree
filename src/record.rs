@@ -23,7 +23,7 @@
 //!          └─────┴─────────────────────────┴─────────────┴─────────────┴─────────────────┘
 //! ```
 //!
-//! `seq` is a `u64` and both lengths are `u32`s, all stored little-endian.
+//! `seq` is a `u64` and both lengths are `u32`s, all stored little-endian
 use crate::entry::Entry;
 use crate::keys::InternalKey;
 use std::num::TryFromIntError;
@@ -31,6 +31,12 @@ use std::num::TryFromIntError;
 /// Size of the record header
 /// 1 byte kind + 8 bytes seq + 4 byte key_len + 4 byte value_len
 const HEADER_LEN: usize = 17;
+
+/// Kind byte for a record holding a live value
+const KIND_VALUE: u8 = 0x00;
+
+/// Kind byte for a tombstone record
+const KIND_TOMBSTONE: u8 = 0x01;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DecodeError {
@@ -46,11 +52,11 @@ pub(crate) enum DecodeError {
     InvalidTombstone,
 }
 
-/// An [`InternalKey`](InternalKey) and its [`Entry`](Entry),
-/// as stored in one record.
+/// An [`InternalKey`] and its [`Entry`],
+/// as stored in one record
 ///
 /// Used internally to represent a single versioned record. The key pairs a user key
-/// byte sequence with a sequence number, and the value is either live bytes or a tombstone.
+/// byte sequence with a sequence number, and the entry is either live bytes or a tombstone
 ///
 /// # Examples
 ///
@@ -60,47 +66,47 @@ pub(crate) enum DecodeError {
 ///         user_key: b"user:1001".to_vec(),
 ///         seq: 1,
 ///     },
-///     value: Entry::Value(b"alice".to_vec()),
+///     entry: Entry::Value(b"alice".to_vec()),
 /// };
 ///
 /// assert_eq!(record.key.user_key, b"user:1001");
 /// assert_eq!(record.key.seq, 1);
-/// assert_eq!(record.value, Entry::Value(b"alice".to_vec()));
+/// assert_eq!(record.entry, Entry::Value(b"alice".to_vec()));
 ///
 /// let deleted = Record {
 ///     key: InternalKey {
 ///         user_key: b"user:1002".to_vec(),
 ///         seq: 2,
 ///     },
-///     value: Entry::Tombstone,
+///     entry: Entry::Tombstone,
 /// };
 /// ```
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Record {
     pub(crate) key: InternalKey,
-    pub(crate) value: Entry,
+    pub(crate) entry: Entry,
 }
 
-/// Encodes `key` and `value` into one record
+/// Encodes `key` and `entry` into one record
 ///
 /// A [`Tombstone`](Entry::Tombstone) is written with kind `0x01`,
-/// `value_len = 0` and no value bytes.
+/// `value_len = 0` and no value bytes
 ///
 /// # Errors
 ///
-/// Returns the conversion error if the key or value is longer than `u32::MAX` bytes.
-pub(crate) fn encode(key: &InternalKey, value: &Entry) -> Result<Vec<u8>, TryFromIntError> {
+/// Returns the conversion error if the key or value is longer than `u32::MAX` bytes
+pub(crate) fn encode(key: &InternalKey, entry: &Entry) -> Result<Vec<u8>, TryFromIntError> {
     let mut res: Vec<u8> = Vec::new();
 
     let key_len = &u32::try_from(key.user_key.len())?.to_le_bytes();
-    let (kind, value_bytes): (&[u8], &[u8]) = match value {
-        Entry::Value(bytes) => (&[0x00], bytes.as_slice()),
-        Entry::Tombstone => (&[0x01], &[]),
+    let (kind, value_bytes): (u8, &[u8]) = match entry {
+        Entry::Value(bytes) => (KIND_VALUE, bytes.as_slice()),
+        Entry::Tombstone => (KIND_TOMBSTONE, &[]),
     };
     let value_len = &u32::try_from(value_bytes.len())?.to_le_bytes();
     let seq_bytes = &key.seq.to_le_bytes();
 
-    res.extend_from_slice(kind);
+    res.push(kind);
     res.extend_from_slice(seq_bytes);
     res.extend_from_slice(key_len);
     res.extend_from_slice(value_len);
@@ -147,9 +153,11 @@ pub(crate) fn decode(input: &[u8]) -> Result<Option<(Record, usize)>, DecodeErro
     let Some((kind, seq, key_len, value_len)) = decode_header(input)? else {
         return Ok(None);
     };
-    if kind != 0 && kind != 1 {
-        return Err(DecodeError::UnknownKind(kind));
-    }
+    let is_tombstone = match kind {
+        KIND_VALUE => false,
+        KIND_TOMBSTONE => true,
+        other => return Err(DecodeError::UnknownKind(other)),
+    };
     let key_len = usize::try_from(key_len).map_err(|_| DecodeError::LengthOverflow)?;
     let value_len = usize::try_from(value_len).map_err(|_| DecodeError::LengthOverflow)?;
 
@@ -161,26 +169,23 @@ pub(crate) fn decode(input: &[u8]) -> Result<Option<(Record, usize)>, DecodeErro
         .checked_add(value_len)
         .ok_or(DecodeError::LengthOverflow)?;
 
-    if kind == 1 && value_len > 0 {
+    if is_tombstone && value_len > 0 {
         return Err(DecodeError::InvalidTombstone);
     }
 
     if value_end > input.len() {
         return Err(DecodeError::TruncatedPayload);
     }
-    let entry_value = match kind {
-        0 => Entry::Value(input[key_end..value_end].to_vec()),
-        1 => Entry::Tombstone,
-        _ => return Err(DecodeError::UnknownKind(kind)),
+    let entry = if is_tombstone {
+        Entry::Tombstone
+    } else {
+        Entry::Value(input[key_end..value_end].to_vec())
     };
     let key = InternalKey {
         user_key: input[HEADER_LEN..key_end].to_vec(),
         seq,
     };
-    let record = Record {
-        key,
-        value: entry_value,
-    };
+    let record = Record { key, entry };
 
     Ok(Some((record, value_end)))
 }
@@ -203,18 +208,7 @@ pub(crate) fn decode_all(mut input: &[u8]) -> Result<Vec<Record>, DecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::SeqNum;
-
-    fn val(bytes: &[u8]) -> Entry {
-        Entry::Value(bytes.to_vec())
-    }
-
-    fn ikey(bytes: &[u8], seq: SeqNum) -> InternalKey {
-        InternalKey {
-            user_key: bytes.to_vec(),
-            seq,
-        }
-    }
+    use crate::test_util::{ikey, val};
 
     #[test]
     fn encode_writes_kind_seq_and_lengths_before_key_and_value() {
@@ -395,7 +389,7 @@ mod tests {
             Ok(Some((
                 Record {
                     key: ikey(b"", 0),
-                    value: val(b""),
+                    entry: val(b""),
                 },
                 HEADER_LEN
             )))
@@ -417,7 +411,7 @@ mod tests {
             Ok(Some((
                 Record {
                     key: ikey(b"apple", 1),
-                    value: val(b"red"),
+                    entry: val(b"red"),
                 },
                 25
             )))
@@ -467,7 +461,7 @@ mod tests {
             Ok(Some((
                 Record {
                     key: ikey(b"apple", 1),
-                    value: val(b"red"),
+                    entry: val(b"red"),
                 },
                 25
             )))
@@ -477,9 +471,9 @@ mod tests {
     #[test]
     fn round_trip_encode_then_decode() {
         let key = ikey(b"grape", 12);
-        let value = val(b"purple");
+        let entry = val(b"purple");
 
-        let encoded = encode(&key, &value).unwrap();
+        let encoded = encode(&key, &entry).unwrap();
         let expected_encoding: Vec<u8> = vec![
             0x00, // kind
             0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // seq = 12
@@ -497,7 +491,7 @@ mod tests {
 
         let decoded = decode(&encoded);
         let expected_decoded: Result<Option<(Record, usize)>, DecodeError> =
-            Ok(Some((Record { key, value }, 28)));
+            Ok(Some((Record { key, entry }, 28)));
         assert_eq!(decoded, expected_decoded);
     }
 
@@ -515,7 +509,7 @@ mod tests {
             Ok(Some((
                 Record {
                     key: ikey(&[0x00, 0xff], 7),
-                    value: val(&[0x80, 0x00]),
+                    entry: val(&[0x80, 0x00]),
                 },
                 21
             )))
@@ -534,7 +528,7 @@ mod tests {
             first,
             Record {
                 key: ikey(b"", 0),
-                value: val(b""),
+                entry: val(b""),
             }
         );
         assert_eq!(consumed, HEADER_LEN);
@@ -545,7 +539,7 @@ mod tests {
             second,
             Record {
                 key: ikey(b"apple", 1),
-                value: val(b"red"),
+                entry: val(b"red"),
             }
         );
         assert_eq!(consumed, 25);
@@ -556,7 +550,7 @@ mod tests {
             third,
             Record {
                 key: ikey(b"b", 2),
-                value: Entry::Tombstone,
+                entry: Entry::Tombstone,
             }
         );
         assert_eq!(consumed, 18);
@@ -580,7 +574,7 @@ mod tests {
             Ok(Some((
                 Record {
                     key: ikey(b"apple", 4),
-                    value: Entry::Tombstone,
+                    entry: Entry::Tombstone,
                 },
                 22
             )))
@@ -595,7 +589,7 @@ mod tests {
             Ok(Some((
                 Record {
                     key: ikey(b"grape", 5),
-                    value: Entry::Tombstone,
+                    entry: Entry::Tombstone,
                 },
                 encoded.len()
             )))
@@ -611,7 +605,7 @@ mod tests {
             Ok(Some((
                 Record {
                     key: ikey(b"", 0),
-                    value: Entry::Tombstone,
+                    entry: Entry::Tombstone,
                 },
                 HEADER_LEN
             )))
@@ -670,15 +664,15 @@ mod tests {
             Ok(vec![
                 Record {
                     key: ikey(b"apple", 1),
-                    value: val(b"red"),
+                    entry: val(b"red"),
                 },
                 Record {
                     key: ikey(b"banana", 2),
-                    value: Entry::Tombstone,
+                    entry: Entry::Tombstone,
                 },
                 Record {
                     key: ikey(b"cherry", 3),
-                    value: val(b""),
+                    entry: val(b""),
                 },
             ])
         );
