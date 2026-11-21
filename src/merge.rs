@@ -1,34 +1,34 @@
-//! K-way merge iterator over sorted [`InternalKey`] streams (such as a
+//! Merges several sorted [`InternalKey`] streams (like a
 //! [`MemTable`](crate::memtable::MemTable) and one or more
-//! [`SsTable`](crate::sstable::SsTable)s).
+//! [`SsTable`](crate::sstable::SsTable)s) into one sorted stream
 //!
-//! Because every write receives a distinct [`SeqNum`](crate::keys::SeqNum) and
-//! [`InternalKey`] orders by `user_key` ascending then `seq` descending,
-//! [`MergeIterator`] yields all versions across all sources in global sorted
-//! order without deduplicating or dropping older versions, leaving snapshot
-//! filtering and compaction deduplication to the caller.
+//! [`MergeIterator`] yields every version from every source. It doesn't drop or
+//! dedupe anything, that's up to the caller (snapshot reads filter it, compaction
+//! cleans it up)
+//!
+//! Every write has its own [`SeqNum`](crate::keys::SeqNum), so no two sources ever
+//! hold the same [`InternalKey`] and the merged order is always well defined
 
 use crate::entry::Entry;
 use crate::keys::InternalKey;
 use std::iter::Peekable;
 
-/// A boxed, sorted stream of `(&InternalKey, &Entry)` pairs feeding into [`MergeIterator`].
+/// A boxed, sorted stream of `(&InternalKey, &Entry)` pairs feeding into [`MergeIterator`]
 pub(crate) type Source<'a> = Box<dyn Iterator<Item = (&'a InternalKey, &'a Entry)> + 'a>;
 
 /// Merges multiple sorted [`Source`] iterators into a single stream ordered by
-/// ascending [`InternalKey`] (`user_key` ascending, `seq` descending).
+/// ascending [`InternalKey`] (`user_key` ascending, `seq` descending)
 ///
-/// Source ordering in `sources` does not affect output order; each step inspects
-/// the front of every non-empty source and advances whichever holds the smallest
-/// [`InternalKey`].
+/// The order of `sources` doesn't matter. Each call to `next` peeks at the front of
+/// every source and takes whichever has the smallest [`InternalKey`]
 pub(crate) struct MergeIterator<'a> {
     sources: Vec<Peekable<Source<'a>>>,
 }
 
 impl<'a> MergeIterator<'a> {
-    /// Creates a [`MergeIterator`] from `sources`.
+    /// Creates a [`MergeIterator`] from `sources`
     ///
-    /// Each source must already yield items in ascending [`InternalKey`] order.
+    /// Each source must already yield items in ascending [`InternalKey`] order
     pub(crate) fn new(sources: Vec<Source<'a>>) -> Self {
         Self {
             sources: sources.into_iter().map(|s| s.peekable()).collect(),

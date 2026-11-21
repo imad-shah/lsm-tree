@@ -2,7 +2,7 @@ use crate::entry::Entry;
 use crate::keys::{InternalKey, SeqNum};
 use std::collections::BTreeMap;
 
-/// In-memory, sorted write buffer.
+/// In-memory, sorted write buffer
 ///
 /// Every [`InternalKey`] (user key + sequence number) maps to an [`Entry`], which is either a
 /// live value or a [`Tombstone`](Entry::Tombstone). Each write adds a new version instead
@@ -20,7 +20,7 @@ impl MemTable {
         Self::default()
     }
 
-    /// Returns the newest entry for `key` with `seq <= read_seq`.
+    /// Returns the newest entry for `key` with `seq <= read_seq`
     ///
     /// - `Some(Entry::Value(_))`: the key has a live value at `read_seq`
     /// - `Some(Entry::Tombstone)`: the key was deleted at or before `read_seq`

@@ -1,19 +1,19 @@
-//! Snapshot visibility filter over sorted [`InternalKey`] streams.
+//! Snapshot visibility filter over sorted [`InternalKey`] streams
 //!
 //! Wraps a merged stream of versioned entries (such as [`MergeIterator`](crate::merge::MergeIterator))
 //! and gives a view at a given `read_seq`:
-//! - Ignores writes newer than `read_seq`.
-//! - Deduplicates each `user_key` to its newest version at or before `read_seq`.
+//! - Ignores writes newer than `read_seq`
+//! - Deduplicates each `user_key` to its newest version at or before `read_seq`
 //! - Suppresses keys whose newest visible version is a [`Tombstone`](Entry::Tombstone)
 
 use crate::entry::Entry;
 use crate::keys::{InternalKey, SeqNum};
 
 /// Wraps a sorted stream of `(&InternalKey, &Entry)` pairs and yields the
-/// `(user_key, value)` pairs visible at `read_seq`.
+/// `(user_key, value)` pairs visible at `read_seq`
 ///
 /// The underlying iterator must yield items in ascending [`InternalKey`] order
-/// (`user_key` ascending, `seq` descending).
+/// (`user_key` ascending, `seq` descending)
 pub(crate) struct Visible<'a, I> {
     iter: I,
     read_seq: SeqNum,

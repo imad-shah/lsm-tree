@@ -1,11 +1,13 @@
-//! LSM-tree storage engine coordinating an in-memory [`MemTable`] and on-disk
-//! [`SsTable`] files with MVCC snapshot reads and full compaction
+//! LSM-tree storage engine built from an in-memory [`MemTable`] and on-disk
+//! [`SsTable`] files, with snapshot (MVCC) reads and full compaction
 //!
-//! Writes receive monotonically increasing sequence numbers (`1, 2, ...`) and
-//! land in the active [`MemTable`]. [`Engine::flush`] writes the active memtable
-//! to a new [`SsTable`] on disk, while [`Engine::compact_all`] merges all
-//! on-disk tables and garbage-collects versions shadowed at or below
-//! `oldest_live`
+//! Every write gets the next sequence number (`1, 2, ...`) and goes into the active
+//! [`MemTable`]
+//!
+//! [`Engine::flush`] writes the active memtable out to a new [`SsTable`] on disk
+//!
+//! [`Engine::compact_all`] merges all on-disk tables into one, and throws away old
+//! versions that no snapshot at or after `oldest_live` can see anymore
 
 use crate::entry::Entry;
 use crate::keys::SeqNum;

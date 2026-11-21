@@ -34,8 +34,8 @@ pub(crate) enum SsTableWriteError {
     /// A key or value was longer than `u32::MAX` bytes, so its length doesn't fit in
     /// the record header. Carries the original conversion error
     Encode(TryFromIntError),
-    /// The file couldn't be created or written. Check `.kind()` on the inner error:
-    /// `ErrorKind::AlreadyExists` means a file was already at that path
+    /// The file couldn't be created or written. If a file was already at that path,
+    /// the inner error's kind is `ErrorKind::AlreadyExists`
     Io(io::Error),
 }
 
@@ -78,7 +78,7 @@ impl SsTable {
     /// Looks up `key` at snapshot `read_seq` in this table
     ///
     /// - `Some(Entry::Value(_))`: the key is live at `read_seq` in this table
-    /// - `Some(Entry::Tombstone)`: the key was deleted; callers must stop
+    /// - `Some(Entry::Tombstone)`: the key was deleted, so callers must stop
     ///   searching older tables
     /// - `None`: this table has no record for `key` with `seq <= read_seq`
     pub(crate) fn get(&self, key: &[u8], read_seq: SeqNum) -> Option<&Entry> {

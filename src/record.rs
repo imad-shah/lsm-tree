@@ -52,35 +52,7 @@ pub(crate) enum DecodeError {
     InvalidTombstone,
 }
 
-/// An [`InternalKey`] and its [`Entry`],
-/// as stored in one record
-///
-/// Used internally to represent a single versioned record. The key pairs a user key
-/// byte sequence with a sequence number, and the entry is either live bytes or a tombstone
-///
-/// # Examples
-///
-/// ```ignore
-/// let record = Record {
-///     key: InternalKey {
-///         user_key: b"user:1001".to_vec(),
-///         seq: 1,
-///     },
-///     entry: Entry::Value(b"alice".to_vec()),
-/// };
-///
-/// assert_eq!(record.key.user_key, b"user:1001");
-/// assert_eq!(record.key.seq, 1);
-/// assert_eq!(record.entry, Entry::Value(b"alice".to_vec()));
-///
-/// let deleted = Record {
-///     key: InternalKey {
-///         user_key: b"user:1002".to_vec(),
-///         seq: 2,
-///     },
-///     entry: Entry::Tombstone,
-/// };
-/// ```
+/// An [`InternalKey`] and its [`Entry`], as stored in one record
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Record {
     pub(crate) key: InternalKey,
@@ -194,8 +166,8 @@ pub(crate) fn decode(input: &[u8]) -> Result<Option<(Record, usize)>, DecodeErro
 ///
 /// # Errors
 ///
-/// Returns the first [`DecodeError`] hit; any trailing bytes that don't form a
-/// complete record are an error, not silently ignored
+/// Returns the first [`DecodeError`] hit. Leftover bytes at the end that don't make
+/// up a full record count as an error too
 pub(crate) fn decode_all(mut input: &[u8]) -> Result<Vec<Record>, DecodeError> {
     let mut records = Vec::new();
     while let Some((record, consumed)) = decode(input)? {
