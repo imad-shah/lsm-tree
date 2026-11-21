@@ -58,21 +58,10 @@ impl<'a> Iterator for MergeIterator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::SeqNum;
     use crate::memtable::MemTable;
-    use crate::sstable::{self, SsTable};
+    use crate::sstable::SsTable;
+    use crate::test_util::{ikey, val};
     use tempfile::tempdir;
-
-    fn val(bytes: &[u8]) -> Entry {
-        Entry::Value(bytes.to_vec())
-    }
-
-    fn ikey(bytes: &[u8], seq: SeqNum) -> InternalKey {
-        InternalKey {
-            user_key: bytes.to_vec(),
-            seq,
-        }
-    }
 
     fn vec_source<'a>(items: &'a [(InternalKey, Entry)]) -> Source<'a> {
         Box::new(items.iter().map(|(k, v)| (k, v)))

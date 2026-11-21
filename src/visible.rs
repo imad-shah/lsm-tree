@@ -51,29 +51,17 @@ where
         None
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::memtable::MemTable;
     use crate::merge::MergeIterator;
-    use crate::sstable::{self, SsTable};
+    use crate::sstable::SsTable;
+    use crate::test_util::{ikey, val};
     use tempfile::tempdir;
 
-    fn val(bytes: &[u8]) -> Entry {
-        Entry::Value(bytes.to_vec())
-    }
-
-    fn ikey(bytes: &[u8], seq: SeqNum) -> InternalKey {
-        InternalKey {
-            user_key: bytes.to_vec(),
-            seq,
-        }
-    }
-
-    fn visible_from_slice<'a>(
-        items: &'a [(InternalKey, Entry)],
-        read_seq: SeqNum,
-    ) -> Vec<(&'a [u8], &'a [u8])> {
+    fn visible_from_slice(items: &[(InternalKey, Entry)], read_seq: SeqNum) -> Vec<(&[u8], &[u8])> {
         Visible::new(items.iter().map(|(k, v)| (k, v)), read_seq).collect()
     }
 

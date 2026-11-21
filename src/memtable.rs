@@ -16,7 +16,7 @@ pub(crate) struct MemTable {
 }
 
 impl MemTable {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -61,20 +61,11 @@ impl MemTable {
         self.store.iter()
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn val(bytes: &[u8]) -> Entry {
-        Entry::Value(bytes.to_vec())
-    }
-
-    fn ikey(bytes: &[u8], seq: SeqNum) -> InternalKey {
-        InternalKey {
-            user_key: bytes.to_vec(),
-            seq,
-        }
-    }
+    use crate::test_util::{ikey, val};
 
     #[test]
     fn missing_key_get_returns_none() {

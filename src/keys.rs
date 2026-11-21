@@ -23,75 +23,32 @@ impl PartialOrd for InternalKey {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_util::ikey;
+
     #[test]
     fn orders_by_user_key_asc_then_seq_desc() {
         let mut values = [
-            crate::keys::InternalKey {
-                user_key: b"banana".to_vec(),
-                seq: 3,
-            },
-            crate::keys::InternalKey {
-                user_key: b"apple".to_vec(),
-                seq: 5,
-            },
-            crate::keys::InternalKey {
-                user_key: b"apple".to_vec(),
-                seq: 3,
-            },
-            crate::keys::InternalKey {
-                user_key: b"apple".to_vec(),
-                seq: 8,
-            },
+            ikey(b"banana", 3),
+            ikey(b"apple", 5),
+            ikey(b"apple", 3),
+            ikey(b"apple", 8),
         ];
         values.sort();
         assert_eq!(
             values,
             [
-                crate::keys::InternalKey {
-                    user_key: b"apple".to_vec(),
-                    seq: 8,
-                },
-                crate::keys::InternalKey {
-                    user_key: b"apple".to_vec(),
-                    seq: 5,
-                },
-                crate::keys::InternalKey {
-                    user_key: b"apple".to_vec(),
-                    seq: 3,
-                },
-                crate::keys::InternalKey {
-                    user_key: b"banana".to_vec(),
-                    seq: 3,
-                },
+                ikey(b"apple", 8),
+                ikey(b"apple", 5),
+                ikey(b"apple", 3),
+                ikey(b"banana", 3),
             ]
         );
     }
 
     #[test]
     fn shorter_prefix_sorts_first_regardless_of_seq() {
-        let mut value = [
-            crate::keys::InternalKey {
-                user_key: b"ab".to_vec(),
-                seq: 9,
-            },
-            crate::keys::InternalKey {
-                user_key: b"a".to_vec(),
-                seq: 1,
-            },
-        ];
-        value.sort();
-        assert_eq!(
-            value,
-            [
-                crate::keys::InternalKey {
-                    user_key: b"a".to_vec(),
-                    seq: 1,
-                },
-                crate::keys::InternalKey {
-                    user_key: b"ab".to_vec(),
-                    seq: 9,
-                },
-            ]
-        );
+        let mut values = [ikey(b"ab", 9), ikey(b"a", 1)];
+        values.sort();
+        assert_eq!(values, [ikey(b"a", 1), ikey(b"ab", 9)]);
     }
 }
